@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+*.local
+*.tsbuildinfo
+
+# Env & secrets
+.env
+.env.local
+*.pem
+
+# Workspace runtime data
+backend/workspace/app.db
+backend/workspace/sessions/
+backend/workspace/*.db
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build
+*.log
+.turbo/
