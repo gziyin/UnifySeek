@@ -25,6 +25,7 @@ dist/
 backend/workspace/app.db
 backend/workspace/sessions/
 backend/workspace/*.db
+backend/workspace/m1-*/
 
 # IDE / OS
 .idea/

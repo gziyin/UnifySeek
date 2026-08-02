@@ -83,7 +83,10 @@ class AgentResearchExecutor:
             config = {"configurable": {"thread_id": str(run_id)}}
 
             report_artifact_id: str | None = None
-            stream = agent.astream_events(input_payload, config=config, version="v3")
+            # 使用 v2 经典事件协议（on_tool_start/on_tool_end，{event,name,data,run_id}）。
+            # langgraph 1.2.10 的 v3 是实验性 run-stream 协议（{type,method,params}），
+            # 与 stream_adapter.map_framework_event 的解析格式不兼容（M1 实测发现）。
+            stream = agent.astream_events(input_payload, config=config, version="v2")
             if inspect.isawaitable(stream):
                 stream = await stream
 
@@ -146,6 +149,7 @@ class AgentResearchExecutor:
 
                 if event_type == "tool.completed" and payload.get("tool_name") == "submit_research_report":
                     artifact_id = payload.get("artifact_id")
+                    degraded = payload.get("degraded", False)
                     if artifact_id:
                         report_artifact_id = str(artifact_id)
                         await self._publisher.publish(
@@ -156,14 +160,20 @@ class AgentResearchExecutor:
                                 "artifact_id": report_artifact_id,
                                 "artifact_kind": "report",
                                 "display_name": "research-report.md",
+                                "degraded": degraded,
                             },
                         )
                         await self._publisher.publish(
                             session_id=run.session_id,
                             run_id=run_id,
                             event_type="report.ready",
-                            payload={"artifact_id": report_artifact_id},
+                            payload={"artifact_id": report_artifact_id, "degraded": degraded},
                         )
+                        if degraded:
+                            # Still end the loop with an artifact, but mark run as failed.
+                            raise RuntimeError(
+                                f"submit_research_report returned degraded report: {payload.get('reason')}"
+                            )
 
                 await self._publisher.publish(
                     session_id=run.session_id,
@@ -206,12 +216,14 @@ class AgentResearchExecutor:
                 )
             raise
         except Exception as exc:  # noqa: BLE001
+            report_id = UUID(report_artifact_id) if report_artifact_id else None
             await self._runs.update_status(
                 run_id,
                 RunStatus.FAILED,
                 finished=True,
                 error_code="RUN_FAILED",
                 error_message=str(exc)[:500],
+                report_artifact_id=report_id,
             )
             await self._publisher.publish(
                 session_id=run.session_id,
@@ -221,5 +233,6 @@ class AgentResearchExecutor:
                     "code": "RUN_FAILED",
                     "message": "Research run failed",
                     "retryable": False,
+                    "report_artifact_id": report_artifact_id,
                 },
             )

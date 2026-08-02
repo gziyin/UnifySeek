@@ -13,7 +13,12 @@ def _safe_summary(value: Any, *, limit: int = 180) -> str:
 
 
 def map_framework_event(raw: dict[str, Any]) -> tuple[EventType | None, str, dict[str, Any]]:
-    """Map a DeepAgents/LangGraph v3 event to a domain event."""
+    """Map a DeepAgents/LangGraph v2 event to a domain event.
+
+    v2 经典协议事件形如 {"event": "on_tool_end", "name": ..., "data": {...}, "run_id": ...}。
+    langgraph 1.2.10 的 v3 实验性 run-stream 协议（{type,method,params}）与此不兼容，
+    调用方（AgentResearchExecutor）统一使用 version="v2"。
+    """
     event_name = str(raw.get("event", ""))
     name = str(raw.get("name", ""))
     data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
@@ -46,6 +51,8 @@ def map_framework_event(raw: dict[str, Any]) -> tuple[EventType | None, str, dic
             payload["recorded"] = output
         if tool_name == "submit_research_report" and isinstance(output, dict):
             payload["artifact_id"] = output.get("artifact_id")
+            payload["degraded"] = output.get("degraded", False)
+            payload["reason"] = output.get("reason")
         return ("tool.completed", "system", payload)
 
     if event_name == "on_tool_error":
@@ -62,13 +69,16 @@ def map_framework_event(raw: dict[str, Any]) -> tuple[EventType | None, str, dic
         )
 
     if event_name == "on_chain_start" and name == "task":
+        # v2 协议下 subagent 名在 data.input 中（task 工具参数），不在 data 顶层。
+        task_input = data.get("input")
+        task_args = task_input if isinstance(task_input, dict) else {}
         return (
             "agent.started",
             "research-orchestrator",
             {
-                "agent_name": str(data.get("subagent", "subagent")),
+                "agent_name": str(task_args.get("subagent", "subagent")),
                 "task_id": str(raw.get("run_id", "")),
-                "description": _safe_summary(data.get("input", "")),
+                "description": _safe_summary(task_input),
             },
         )
 

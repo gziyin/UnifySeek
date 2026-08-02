@@ -108,6 +108,21 @@ def create_orchestrator_tools(
     store: EvidenceStore,
     artifacts: ArtifactRepository,
 ) -> list[StructuredTool]:
+    async def search_web(query: str, max_results: int = 5) -> dict:
+        return await search_web_impl(
+            context=context,
+            store=store,
+            query=query,
+            max_results=max_results,
+        )
+
+    async def extract_web_sources(evidence_ids: list[str]) -> dict:
+        return await extract_web_sources_impl(
+            context=context,
+            store=store,
+            evidence_ids=evidence_ids,
+        )
+
     async def get_evidence_ledger() -> dict:
         return await get_evidence_ledger_impl(store=store)
 
@@ -122,6 +137,16 @@ def create_orchestrator_tools(
         )
 
     return [
+        StructuredTool.from_function(
+            coroutine=search_web,
+            name="search_web",
+            description="Search the public web and create search_snippet evidence records.",
+        ),
+        StructuredTool.from_function(
+            coroutine=extract_web_sources,
+            name="extract_web_sources",
+            description="Extract full text for previously discovered web evidence IDs.",
+        ),
         StructuredTool.from_function(
             coroutine=get_evidence_ledger,
             name="get_evidence_ledger",
