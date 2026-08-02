@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ai_dev_researcher.domain.events import EventType
@@ -10,6 +11,29 @@ def _safe_summary(value: Any, *, limit: int = 180) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
+
+
+def _coerce_tool_output(output: Any) -> dict | None:
+    """规约 on_tool_end 的 data.output 为 dict。
+
+    langchain 1.x ToolNode 的 on_tool_end data.output 可能是 ToolMessage
+    （content 为 JSON 字符串、name 为工具名），而非工具函数的原始返回 dict。
+    统一尝试规约：dict 直接用；对象取其 .content；字符串直接 json.loads。
+    规约失败返回 None（调用方按"拿不到结构化结果"处理）。
+    """
+    if isinstance(output, dict):
+        return output
+    content = getattr(output, "content", None)
+    if content is None and isinstance(output, str):
+        content = output
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def map_framework_event(raw: dict[str, Any]) -> tuple[EventType | None, str, dict[str, Any]]:
@@ -43,16 +67,17 @@ def map_framework_event(raw: dict[str, Any]) -> tuple[EventType | None, str, dic
             "tool_call_id": str(raw.get("run_id", "")),
             "output_summary": _safe_summary(output),
         }
-        if tool_name == "search_web" and isinstance(output, dict):
-            for item in output.get("items", []):
+        result = _coerce_tool_output(output)
+        if tool_name == "search_web" and result is not None:
+            for item in result.get("items", []):
                 if isinstance(item, dict) and item.get("evidence_id"):
                     payload["discovered"] = item
-        if tool_name == "record_document_evidence" and isinstance(output, dict):
-            payload["recorded"] = output
-        if tool_name == "submit_research_report" and isinstance(output, dict):
-            payload["artifact_id"] = output.get("artifact_id")
-            payload["degraded"] = output.get("degraded", False)
-            payload["reason"] = output.get("reason")
+        if tool_name == "record_document_evidence" and result is not None:
+            payload["recorded"] = result
+        if tool_name == "submit_research_report" and result is not None:
+            payload["artifact_id"] = result.get("artifact_id")
+            payload["degraded"] = result.get("degraded", False)
+            payload["reason"] = result.get("reason")
         return ("tool.completed", "system", payload)
 
     if event_name == "on_tool_error":

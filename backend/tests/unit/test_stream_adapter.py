@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+from langchain_core.messages import ToolMessage
+
 from ai_dev_researcher.agents.stream_adapter import map_framework_event
 
 
@@ -54,6 +58,39 @@ def test_map_task_chain_start_reads_subagent_from_input():
     assert event_type == "agent.started"
     assert actor == "research-orchestrator"
     assert payload["agent_name"] == "web-researcher"
+
+
+def test_map_submit_report_end_with_toolmessage_output():
+    """langchain 1.x ToolNode 的 on_tool_end data.output 是 ToolMessage 而非 dict。"""
+    output = ToolMessage(
+        content=json.dumps({"artifact_id": "abc-123", "title": "t", "degraded": False, "reason": None}),
+        tool_call_id="r1",
+        name="submit_research_report",
+    )
+    raw = {"event": "on_tool_end", "name": "submit_research_report", "run_id": "r1", "data": {"output": output}}
+    event_type, _, payload = map_framework_event(raw)
+    assert event_type == "tool.completed"
+    assert payload["artifact_id"] == "abc-123"
+
+
+def test_map_search_web_end_with_toolmessage_output():
+    output = ToolMessage(
+        content=json.dumps(
+            {"items": [{"evidence_id": "S1", "title": "T", "url": "https://x", "evidence_level": "search_snippet"}]}
+        ),
+        tool_call_id="r1",
+        name="search_web",
+    )
+    raw = {"event": "on_tool_end", "name": "search_web", "run_id": "r1", "data": {"output": output}}
+    _, _, payload = map_framework_event(raw)
+    assert payload["discovered"]["evidence_id"] == "S1"
+
+
+def test_map_tool_end_with_unparseable_output_keeps_summary_only():
+    raw = {"event": "on_tool_end", "name": "search_web", "run_id": "r1", "data": {"output": "some plain error text"}}
+    _, _, payload = map_framework_event(raw)
+    assert payload["tool_name"] == "search_web"
+    assert "discovered" not in payload
 
 
 def test_map_unknown_event_returns_none():
