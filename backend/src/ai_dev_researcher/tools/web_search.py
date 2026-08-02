@@ -49,13 +49,13 @@ async def search_web_impl(
     try:
         from tavily import AsyncTavilyClient
     except ImportError as exc:
-        raise SearchProviderError("tavily client unavailable") from exc
+        raise SearchProviderError("tavily client unavailable", provider="tavily") from exc
 
     client = AsyncTavilyClient(api_key=context.settings.tavily_api_key)
     try:
         response = await client.search(query=query, max_results=max_results, include_raw_content=False)
     except Exception as exc:  # noqa: BLE001
-        raise SearchProviderError(f"tavily search failed: {exc}") from exc
+        raise SearchProviderError(f"tavily search failed: {exc}", provider="tavily") from exc
 
     items: list[dict] = []
     seen: set[str] = set()
@@ -105,7 +105,7 @@ async def extract_web_sources_impl(
     try:
         from tavily import AsyncTavilyClient
     except ImportError as exc:
-        raise SearchProviderError("tavily client unavailable") from exc
+        raise SearchProviderError("tavily client unavailable", provider="tavily") from exc
 
     client = AsyncTavilyClient(api_key=context.settings.tavily_api_key)
     updated: list[dict] = []

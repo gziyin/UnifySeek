@@ -61,3 +61,22 @@ class ArtifactNotFoundError(AppError):
 class ReportValidationError(AppError):
     code = "REPORT_VALIDATION_ERROR"
     status_code = 422
+
+
+class SearchProviderError(AppError):
+    """External search provider (e.g. Tavily) call failed."""
+
+    code = "SEARCH_PROVIDER_ERROR"
+    status_code = 502
+    retryable = True
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        code: str | None = None,
+        retryable: bool | None = None,
+    ):
+        super().__init__(message, code=code, retryable=retryable)
+        self.provider = provider

@@ -86,15 +86,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
             task_manager=task_manager,
         )
-        # Wire run_service after construction to avoid circular init issues.
-        container.run_service = RunService(
-            sessions=sessions_repo,
-            runs=runs_repo,
-            artifacts=artifacts_repo,
-            paths=paths,
-            publisher=publisher,
-            task_manager=task_manager,
-        )
         app.state.container = container
         try:
             yield
