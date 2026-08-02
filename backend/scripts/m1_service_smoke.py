@@ -86,8 +86,8 @@ async def main() -> int:
     run = await run_service.create_run(session.session_id, request)
     print(f"Created session={session.session_id} run={run.run_id} status={run.status}")
 
-    # Poll run status until terminal.
-    for _ in range(60):
+    # Poll run status until terminal. 真实 DeepSeek 多轮 + Tavily 检索可能耗时数分钟。
+    for _ in range(300):
         await asyncio.sleep(2)
         current = await runs_repo.get(run.run_id)
         if current is None:

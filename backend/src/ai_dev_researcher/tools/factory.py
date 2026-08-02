@@ -3,6 +3,7 @@ from __future__ import annotations
 from langchain_core.tools import StructuredTool
 
 from ai_dev_researcher.agents.context import RunContext
+from ai_dev_researcher.domain.reports import Disagreement, ResearchClaim, ReportSection
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.tools.document_reader import (
@@ -10,6 +11,7 @@ from ai_dev_researcher.tools.document_reader import (
     read_run_document_impl,
     record_document_evidence_impl,
 )
+from ai_dev_researcher.tools.report_schema import SubmitResearchReportArgs
 from ai_dev_researcher.tools.report_submitter import (
     get_evidence_ledger_impl,
     submit_research_report_impl,
@@ -126,14 +128,29 @@ def create_orchestrator_tools(
     async def get_evidence_ledger() -> dict:
         return await get_evidence_ledger_impl(store=store)
 
-    async def submit_research_report(report: dict) -> dict:
+    async def submit_research_report(
+        title: str,
+        executive_summary_claim_ids: list[str],
+        sections: list[ReportSection],
+        recommendations: list[ResearchClaim],
+        disagreements: list[Disagreement] | None = None,
+        unknowns: list[str] | None = None,
+    ) -> dict:
+        report_data = {
+            "title": title,
+            "executive_summary_claim_ids": executive_summary_claim_ids,
+            "sections": [s.model_dump(mode="json") for s in sections],
+            "recommendations": [c.model_dump(mode="json") for c in recommendations],
+            "disagreements": [d.model_dump(mode="json") for d in (disagreements or [])],
+            "unknowns": unknowns or [],
+        }
         return await submit_research_report_impl(
             store=store,
             artifacts=artifacts,
             sessions_root=context.paths.sessions_root,
             session_id=context.session_id,
             run_id=context.run_id,
-            report_data=report,
+            report_data=report_data,
         )
 
     return [
@@ -155,6 +172,12 @@ def create_orchestrator_tools(
         StructuredTool.from_function(
             coroutine=submit_research_report,
             name="submit_research_report",
-            description="Submit structured research report for validation and markdown rendering.",
+            description=(
+                "提交最终结构化研究报告。硬性前置条件：1) 必须先调用 search_web（必要时 "
+                "extract_web_sources）收集网页证据；2) 先调用 get_evidence_ledger 核对证据 ID；"
+                "3) 报告内每个 claim 的 citation_ids 必须引用 ledger 中真实存在的证据 ID"
+                "（形如 S1/S2/D1）。返回 artifact_id。"
+            ),
+            args_schema=SubmitResearchReportArgs,
         ),
     ]
