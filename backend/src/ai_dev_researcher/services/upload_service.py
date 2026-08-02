@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from uuid import UUID
@@ -19,6 +20,8 @@ from ai_dev_researcher.storage.normalized_docs import (
     sanitize_display_name,
 )
 from ai_dev_researcher.storage.paths import WorkspacePaths
+
+logger = logging.getLogger(__name__)
 
 
 class UploadService:
@@ -96,7 +99,12 @@ class UploadService:
             parse_error = exc
         finally:
             if typed_path.exists() and typed_path != original_path:
-                typed_path.unlink(missing_ok=True)
+                try:
+                    typed_path.unlink(missing_ok=True)
+                except OSError:
+                    # 清理 typed 副本失败不应让上传失败（沙箱环境可能拦截 unlink，
+                    # 如 safe-delete 回收站不可用）。副本留在磁盘无碍，仅告警。
+                    logger.warning("failed to remove typed copy %s", typed_path)
 
         await self._artifacts.create(artifact)
         await self._sessions.touch(session_id)
