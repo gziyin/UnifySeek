@@ -12,6 +12,14 @@ export type RunViewState = {
     source_type: string;
     title: string;
     evidence_level: string;
+    url?: string;
+    path?: string;
+    locator?: string;
+    query?: string;
+    line_start?: number | null;
+    line_end?: number | null;
+    page?: number | null;
+    excerpt?: string;
   }>;
   reportArtifactId?: string;
 };
@@ -63,6 +71,16 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
             source_type: String(event.payload.source_type ?? ""),
             title: String(event.payload.title ?? ""),
             evidence_level: String(event.payload.evidence_level ?? ""),
+            url: event.payload.url != null ? String(event.payload.url) : undefined,
+            path: event.payload.path != null ? String(event.payload.path) : undefined,
+            locator:
+              event.payload.locator != null ? String(event.payload.locator) : undefined,
+            query: event.payload.query != null ? String(event.payload.query) : undefined,
+            line_start: event.payload.line_start ?? undefined,
+            line_end: event.payload.line_end ?? undefined,
+            page: event.payload.page ?? undefined,
+            excerpt:
+              event.payload.excerpt != null ? String(event.payload.excerpt) : undefined,
           });
         }
         if (event.type === "report.ready" || event.type === "run.succeeded") {

@@ -187,7 +187,7 @@ export function ResearchWorkbench() {
       <header className="brand-bar">
         <div>
           <h1>AI Dev Researcher</h1>
-          <p>DeepAgents 技术深度调研工作台 · Fake Slice 已打通主线</p>
+          <p>DeepAgents 多智能体调研：网页取证 + 文档分析 + 本地知识库</p>
         </div>
         <div>
           <span

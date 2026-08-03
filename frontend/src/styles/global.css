@@ -136,6 +136,8 @@ textarea {
   overflow: auto;
   flex: 1;
   min-height: 0;
+  max-height: calc(100vh - 320px);
+  padding-right: 0.25rem;
 }
 
 .timeline-item,
@@ -148,6 +150,177 @@ textarea {
 .ledger-item strong {
   font-family: var(--mono);
   font-size: 0.85rem;
+}
+
+/* ---- 时间线：可展开详情 + actor 着色 ---- */
+.timeline-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.35rem 0.4rem;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: default;
+  color: inherit;
+  font: inherit;
+}
+
+.timeline-head.expandable {
+  cursor: pointer;
+}
+
+.timeline-head:hover {
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+
+.timeline-seq {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.timeline-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-actor {
+  color: var(--muted);
+  font-size: 0.78rem;
+  flex-shrink: 0;
+}
+
+.timeline-chevron {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.timeline-detail {
+  margin: 0.4rem 0 0.2rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--panel-soft);
+  border-left: 3px solid var(--accent);
+  font-size: 0.85rem;
+}
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+}
+
+.detail-row dt {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.detail-value {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.timeline-item.actor-orchestrator .timeline-head .timeline-label {
+  color: var(--accent);
+}
+
+.timeline-item.actor-web .timeline-head .timeline-label::before {
+  content: "🌐 ";
+}
+
+.timeline-item.actor-doc .timeline-head .timeline-label::before {
+  content: "📄 ";
+}
+
+.timeline-item.actor-system .timeline-head .timeline-label {
+  font-style: italic;
+}
+
+.todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+
+/* ---- 来源账本：标签说明 + 完整地址 + 复制 ---- */
+.ledger-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ledger-title {
+  margin: 0.2rem 0;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.level-badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.level-search_snippet {
+  background: #f3e2c7;
+  color: #8a5a17;
+}
+
+.level-first_party,
+.level-official_primary,
+.level-user_document {
+  background: #d9eed9;
+  color: #1d6b1d;
+}
+
+.copy-btn {
+  margin-left: auto;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.78rem;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+
+.copy-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.ledger-target {
+  margin-top: 0.3rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.ledger-target a {
+  color: var(--accent);
+}
+
+.ledger-excerpt {
+  margin-top: 0.3rem;
+  font-size: 0.82rem;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* ---- 报告：固定高度预览 ---- */
+.report-body {
+  line-height: 1.65;
 }
 
 .upload-list {
