@@ -105,12 +105,16 @@ class EvidenceRepository:
         *,
         web_count: int = 0,
         document_count: int = 0,
-    ) -> tuple[list[str], list[str]]:
+        knowledge_base_count: int = 0,
+    ) -> tuple[list[str], list[str], list[str]]:
         existing = await self.list_for_run(run_id)
         web_ids = [item.id for item in existing if item.id.startswith("S")]
         doc_ids = [item.id for item in existing if item.id.startswith("D")]
+        kb_ids = [item.id for item in existing if item.id.startswith("K")]
         next_s = len(web_ids) + 1
         next_d = len(doc_ids) + 1
+        next_k = len(kb_ids) + 1
         allocated_web = [f"S{next_s + i}" for i in range(web_count)]
         allocated_doc = [f"D{next_d + i}" for i in range(document_count)]
-        return allocated_web, allocated_doc
+        allocated_kb = [f"K{next_k + i}" for i in range(knowledge_base_count)]
+        return allocated_web, allocated_doc, allocated_kb

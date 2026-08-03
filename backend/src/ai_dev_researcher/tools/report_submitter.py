@@ -18,6 +18,9 @@ from ai_dev_researcher.storage.artifacts import (
 
 _DEGRADED_TITLE = "[DEGRADED] 研究报告生成失败"
 
+# 证据等级强度排序：high confidence claim 必须至少引用一个达到此强度及以上的证据。
+_STRONG_EVIDENCE_LEVELS = {"first_party", "official_primary", "user_document"}
+
 
 async def get_evidence_ledger_impl(*, store: EvidenceStore) -> dict:
     records = await store.list_for_run()
@@ -115,6 +118,10 @@ async def submit_research_report_impl(
                 raise ReportValidationError(
                     f"claim {claim.id} references unknown evidence: {unknown}"
                 )
+            if len(set(claim.citation_ids)) != len(claim.citation_ids):
+                raise ReportValidationError(
+                    f"claim {claim.id} references the same evidence more than once"
+                )
             if claim.confidence == "high":
                 levels = []
                 for cid in claim.citation_ids:
@@ -125,6 +132,23 @@ async def submit_research_report_impl(
                     raise ReportValidationError(
                         f"claim {claim.id} cannot be high confidence with only search snippets"
                     )
+                if not any(level in _STRONG_EVIDENCE_LEVELS for level in levels):
+                    raise ReportValidationError(
+                        f"claim {claim.id} cannot be high confidence without "
+                        "first-party/official/user-document evidence"
+                    )
+
+        for disagreement in report.disagreements:
+            side_ids = [
+                cid
+                for side in disagreement.sides
+                for cid in side.citation_ids
+            ]
+            unknown = [cid for cid in side_ids if cid not in evidence_ids]
+            if unknown:
+                raise ReportValidationError(
+                    f"disagreement '{disagreement.topic}' references unknown evidence: {unknown}"
+                )
     except (ValidationError, ReportValidationError) as exc:
         degrade_reason = f"{type(exc).__name__}: {exc}"
         report = None

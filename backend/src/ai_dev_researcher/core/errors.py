@@ -63,6 +63,13 @@ class ReportValidationError(AppError):
     status_code = 422
 
 
+class KnowledgeBaseError(AppError):
+    """Local knowledge base access failed (missing file, escape attempt, etc.)."""
+
+    code = "KNOWLEDGE_BASE_ERROR"
+    status_code = 403
+
+
 class SearchProviderError(AppError):
     """External search provider (e.g. Tavily) call failed."""
 

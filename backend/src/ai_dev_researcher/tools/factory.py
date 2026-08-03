@@ -10,6 +10,12 @@ from ai_dev_researcher.tools.document_reader import (
     list_run_documents_impl,
     read_run_document_impl,
     record_document_evidence_impl,
+    search_run_documents_impl,
+)
+from ai_dev_researcher.tools.knowledge_base import (
+    list_knowledge_base_entries_impl,
+    read_knowledge_base_file_impl,
+    record_knowledge_base_evidence_impl,
 )
 from ai_dev_researcher.tools.report_schema import SubmitResearchReportArgs
 from ai_dev_researcher.tools.report_submitter import (
@@ -53,6 +59,7 @@ def create_document_tools(
     context: RunContext,
     store: EvidenceStore,
     artifacts: ArtifactRepository,
+    vector_store=None,
 ) -> list[StructuredTool]:
     async def list_run_documents() -> dict:
         return await list_run_documents_impl(context=context, artifacts=artifacts)
@@ -86,11 +93,62 @@ def create_document_tools(
             page=page,
         )
 
+    async def list_knowledge_base_entries(path: str = ".") -> dict:
+        return await list_knowledge_base_entries_impl(context=context, path=path)
+
+    async def read_knowledge_base_file(path: str, offset: int = 0, limit: int = 4000) -> dict:
+        return await read_knowledge_base_file_impl(
+            context=context,
+            path=path,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def record_knowledge_base_evidence(
+        path: str,
+        title: str,
+        excerpt: str,
+        line_start: int,
+        line_end: int,
+    ) -> dict:
+        return await record_knowledge_base_evidence_impl(
+            context=context,
+            store=store,
+            path=path,
+            title=title,
+            excerpt=excerpt,
+            line_start=line_start,
+            line_end=line_end,
+        )
+
+    async def search_run_documents(
+        query: str,
+        artifact_ids: list[str] | None = None,
+        top_k: int = 5,
+    ) -> dict:
+        return await search_run_documents_impl(
+            context=context,
+            artifacts=artifacts,
+            vector_store=vector_store,
+            query=query,
+            artifact_ids=artifact_ids,
+            top_k=top_k,
+        )
+
     return [
         StructuredTool.from_function(
             coroutine=list_run_documents,
             name="list_run_documents",
             description="List normalized documents authorized for this run.",
+        ),
+        StructuredTool.from_function(
+            coroutine=search_run_documents,
+            name="search_run_documents",
+            description=(
+                "Semantically search indexed run documents (RAG) and return matching "
+                "chunks with line ranges. Use this first to locate relevant snippets, "
+                "then read_run_document for exact context."
+            ),
         ),
         StructuredTool.from_function(
             coroutine=read_run_document,
@@ -101,6 +159,27 @@ def create_document_tools(
             coroutine=record_document_evidence,
             name="record_document_evidence",
             description="Record document evidence with line/page locator.",
+        ),
+        StructuredTool.from_function(
+            coroutine=list_knowledge_base_entries,
+            name="list_knowledge_base_entries",
+            description=(
+                "List files/dirs in the local knowledge base (project workspace root). "
+                "Path is relative to the knowledge base root; use '.' for the root itself."
+            ),
+        ),
+        StructuredTool.from_function(
+            coroutine=read_knowledge_base_file,
+            name="read_knowledge_base_file",
+            description=(
+                "Read a chunk of a local knowledge base file (relative path, e.g. "
+                "'deepagents-0.6.2/README.md'). Supported: md/txt/py/json/yaml/toml."
+            ),
+        ),
+        StructuredTool.from_function(
+            coroutine=record_knowledge_base_evidence,
+            name="record_knowledge_base_evidence",
+            description="Record evidence from the local knowledge base with line range.",
         ),
     ]
 

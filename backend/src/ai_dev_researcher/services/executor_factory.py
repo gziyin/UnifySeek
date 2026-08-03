@@ -23,6 +23,7 @@ def create_run_executor(
     evidence: EvidenceRepository,
     publisher: EventPublisher,
     paths: WorkspacePaths,
+    vector_store=None,
 ) -> RunExecutor:
     if settings.fake_agent_mode or not settings.deepseek_api_key:
         return FakeResearchExecutor(
@@ -39,4 +40,5 @@ def create_run_executor(
         evidence=evidence,
         publisher=publisher,
         paths=paths,
+        vector_store=vector_store,
     )

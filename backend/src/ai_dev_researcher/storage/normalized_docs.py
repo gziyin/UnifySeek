@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 from pypdf import PdfReader
 from docx import Document
+
+from ai_dev_researcher.storage.docling_parser import parse_with_docling
+
+logger = logging.getLogger(__name__)
 
 
 SUPPORTED_EXTENSIONS = {
@@ -25,10 +30,15 @@ def normalize_document(path: Path, *, max_chars: int, max_pages: int = 100) -> s
     if ext == ".bin":
         # Storage uses .bin; sniff by magic or caller should pass original name.
         raise ValueError("normalize_document requires typed source path")
-    if ext == ".pdf":
-        text = _normalize_pdf(path, max_pages=max_pages)
-    elif ext == ".docx":
-        text = _normalize_docx(path)
+    if ext in {".pdf", ".docx"}:
+        # docling 优先（复杂版式/表格），失败回退 pypdf/python-docx。
+        text = parse_with_docling(path)
+        if text is not None:
+            logger.info("normalized %s with docling", path.name)
+        elif ext == ".pdf":
+            text = _normalize_pdf(path, max_pages=max_pages)
+        else:
+            text = _normalize_docx(path)
     elif ext in {".md", ".txt"}:
         text = _normalize_text(path)
     else:

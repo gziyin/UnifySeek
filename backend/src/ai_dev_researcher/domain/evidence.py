@@ -12,7 +12,7 @@ from ai_dev_researcher.domain.sessions import utc_now
 class EvidenceRecord(BaseModel):
     id: str
     run_id: UUID
-    source_type: Literal["web", "document"]
+    source_type: Literal["web", "document", "knowledge_base"]
     evidence_level: Literal[
         "official_primary",
         "first_party",

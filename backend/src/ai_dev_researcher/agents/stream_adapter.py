@@ -72,12 +72,14 @@ def map_framework_event(raw: dict[str, Any]) -> tuple[EventType | None, str, dic
             for item in result.get("items", []):
                 if isinstance(item, dict) and item.get("evidence_id"):
                     payload["discovered"] = item
-        if tool_name == "record_document_evidence" and result is not None:
+        if tool_name in {"record_document_evidence", "record_knowledge_base_evidence"} and result is not None:
             payload["recorded"] = result
         if tool_name == "submit_research_report" and result is not None:
             payload["artifact_id"] = result.get("artifact_id")
             payload["degraded"] = result.get("degraded", False)
             payload["reason"] = result.get("reason")
+        if tool_name == "write_todos" and result is not None:
+            payload["items"] = result.get("todos", []) or result.get("items", [])
         return ("tool.completed", "system", payload)
 
     if event_name == "on_tool_error":

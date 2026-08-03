@@ -98,3 +98,65 @@ def test_map_unknown_event_returns_none():
     assert event_type is None
     assert actor == "system"
     assert payload == {}
+
+
+def test_map_search_web_end_includes_metadata_fields():
+    output = {
+        "items": [
+            {
+                "evidence_id": "S1",
+                "title": "T",
+                "url": "https://example.com/a",
+                "query": "deepagents",
+                "publisher_key": "example.com",
+                "result_rank": 1,
+                "evidence_level": "search_snippet",
+            }
+        ]
+    }
+    _, _, payload = map_framework_event(_tool_end("search_web", "r1", output))
+    discovered = payload["discovered"]
+    assert discovered["url"] == "https://example.com/a"
+    assert discovered["query"] == "deepagents"
+    assert discovered["publisher_key"] == "example.com"
+
+
+def test_map_record_knowledge_base_evidence_extracts_recorded():
+    output = {
+        "evidence_id": "K1",
+        "locator": "kb:deepagents-0.6.2/README.md lines 1-3",
+        "path": "deepagents-0.6.2/README.md",
+        "line_start": 1,
+        "line_end": 3,
+        "excerpt": "excerpt…",
+    }
+    _, _, payload = map_framework_event(_tool_end("record_knowledge_base_evidence", "r1", output))
+    assert payload["tool_name"] == "record_knowledge_base_evidence"
+    assert payload["recorded"]["evidence_id"] == "K1"
+    assert payload["recorded"]["path"] == "deepagents-0.6.2/README.md"
+
+
+def test_map_record_document_evidence_includes_artifact_meta():
+    output = {
+        "evidence_id": "D1",
+        "artifact_id": "art-1",
+        "display_name": "notes.md",
+        "locator": "lines 1-3",
+        "line_start": 1,
+        "line_end": 3,
+        "page": 2,
+        "excerpt": "note…",
+    }
+    _, _, payload = map_framework_event(_tool_end("record_document_evidence", "r1", output))
+    recorded = payload["recorded"]
+    assert recorded["artifact_id"] == "art-1"
+    assert recorded["display_name"] == "notes.md"
+    assert recorded["line_start"] == 1
+    assert recorded["page"] == 2
+
+
+def test_map_write_todos_extracts_items():
+    output = {"todos": [{"id": "1", "content": "搜索网页", "status": "in_progress"}]}
+    _, _, payload = map_framework_event(_tool_end("write_todos", "r1", output))
+    assert payload["tool_name"] == "write_todos"
+    assert payload["items"][0]["content"] == "搜索网页"

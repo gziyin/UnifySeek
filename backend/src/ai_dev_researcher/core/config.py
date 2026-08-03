@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_WORKSPACE = BACKEND_ROOT / "workspace"
+DEFAULT_KNOWLEDGE_BASE = BACKEND_ROOT.parent / "knowledge_base"
 
 
 class Settings(BaseSettings):
@@ -22,6 +23,13 @@ class Settings(BaseSettings):
     app_port: int = 8000
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
     workspace_root: Path = Field(default=DEFAULT_WORKSPACE)
+    knowledge_base_root: Path = Field(default=DEFAULT_KNOWLEDGE_BASE)
+
+    # RAG embedding 配置：HF_HUB_CACHE 指向本地模型缓存根目录
+    # （如 E:/04Programming/Models，内含 models--sentence-transformers--* 结构）。
+    # 为空时使用 huggingface 默认缓存（~/.cache/huggingface/hub）。
+    hf_hub_cache: str = ""
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"

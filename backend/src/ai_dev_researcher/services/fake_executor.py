@@ -81,7 +81,7 @@ class FakeResearchExecutor:
             )
             await asyncio.sleep(0.05)
 
-            web_ids, _ = await self._evidence.allocate_ids(run_id, web_count=1)
+            web_ids, _, _ = await self._evidence.allocate_ids(run_id, web_count=1)
             web_id = web_ids[0]
             web_evidence = EvidenceRecord(
                 id=web_id,
@@ -141,7 +141,7 @@ class FakeResearchExecutor:
                         "description": "阅读授权上传文档",
                     },
                 )
-                _, doc_ids = await self._evidence.allocate_ids(run_id, document_count=1)
+                _, doc_ids, _ = await self._evidence.allocate_ids(run_id, document_count=1)
                 doc_id = doc_ids[0]
                 uploaded = await self._artifacts.get(run.request.uploaded_artifact_ids[0])
                 title = uploaded.display_name if uploaded else "uploaded document"

@@ -32,11 +32,13 @@ class UploadService:
         artifacts: ArtifactRepository,
         paths: WorkspacePaths,
         settings: Settings,
+        vector_store=None,
     ):
         self._sessions = sessions
         self._artifacts = artifacts
         self._paths = paths
         self._settings = settings
+        self._vector_store = vector_store
 
     async def upload(
         self,
@@ -105,6 +107,23 @@ class UploadService:
                     # 清理 typed 副本失败不应让上传失败（沙箱环境可能拦截 unlink，
                     # 如 safe-delete 回收站不可用）。副本留在磁盘无碍，仅告警。
                     logger.warning("failed to remove typed copy %s", typed_path)
+
+        # RAG 向量索引：失败不阻塞上传流程，仅记录 warning。
+        if (
+            artifact.parse_status == ParseStatus.PARSED
+            and self._vector_store is not None
+            and artifact.normalized_storage_path is not None
+        ):
+            try:
+                index_text = Path(artifact.normalized_storage_path).read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                self._vector_store.index_document(
+                    artifact_id=str(artifact.artifact_id),
+                    text=index_text,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("vector index failed for %s: %s", artifact.display_name, exc)
 
         await self._artifacts.create(artifact)
         await self._sessions.touch(session_id)

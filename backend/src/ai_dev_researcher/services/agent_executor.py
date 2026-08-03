@@ -30,6 +30,7 @@ class AgentResearchExecutor:
         evidence: EvidenceRepository,
         publisher: EventPublisher,
         paths: WorkspacePaths,
+        vector_store=None,
     ):
         self._settings = settings
         self._runs = runs
@@ -37,6 +38,7 @@ class AgentResearchExecutor:
         self._evidence = evidence
         self._publisher = publisher
         self._paths = paths
+        self._vector_store = vector_store
 
     async def __call__(self, run_id: UUID) -> None:
         run = await self._runs.get(run_id)
@@ -71,7 +73,13 @@ class AgentResearchExecutor:
             )
 
             model_binding = create_model_binding(self._settings)
-            agent = create_research_agent(context, model_binding, store, self._artifacts)
+            agent = create_research_agent(
+                context,
+                model_binding,
+                store,
+                self._artifacts,
+                vector_store=self._vector_store,
+            )
             input_payload = {
                 "messages": [
                     {
@@ -83,6 +91,8 @@ class AgentResearchExecutor:
             config = {"configurable": {"thread_id": str(run_id)}}
 
             report_artifact_id: str | None = None
+            # 维护 tool_call_id -> input_summary，用于在 tool.completed 上附带脱敏输入摘要。
+            tool_inputs: dict[str, str] = {}
             # 使用 v2 经典事件协议（on_tool_start/on_tool_end，{event,name,data,run_id}）。
             # langgraph 1.2.10 的 v3 是实验性 run-stream 协议（{type,method,params}），
             # 与 stream_adapter.map_framework_event 的解析格式不兼容（M1 实测发现）。
@@ -97,6 +107,15 @@ class AgentResearchExecutor:
                 if event_type is None:
                     continue
 
+                if event_type == "tool.started":
+                    tool_inputs[payload.get("tool_call_id", "")] = payload.get(
+                        "input_summary", ""
+                    )
+                if event_type == "tool.completed":
+                    payload["tool_input"] = tool_inputs.get(
+                        payload.get("tool_call_id", ""), ""
+                    )
+
                 if event_type == "tool.completed" and payload.get("discovered"):
                     discovered = payload["discovered"]
                     await self._publisher.publish(
@@ -108,6 +127,10 @@ class AgentResearchExecutor:
                             "evidence_id": discovered.get("evidence_id"),
                             "source_type": "web",
                             "title": discovered.get("title"),
+                            "url": discovered.get("url"),
+                            "query": discovered.get("query"),
+                            "publisher_key": discovered.get("publisher_key"),
+                            "result_rank": discovered.get("result_rank"),
                             "evidence_level": discovered.get("evidence_level", "search_snippet"),
                         },
                     )
@@ -118,33 +141,69 @@ class AgentResearchExecutor:
                         actor="web-researcher",
                         payload={
                             "evidence_id": discovered.get("evidence_id"),
+                            "source_type": "web",
                             "locator": discovered.get("url"),
+                            "excerpt": discovered.get("snippet"),
                         },
                     )
 
                 if event_type == "tool.completed" and payload.get("recorded"):
                     recorded = payload["recorded"]
+                    tool_name = payload.get("tool_name", "")
+                    if tool_name == "record_knowledge_base_evidence":
+                        actor = "document-analyst"
+                        source_type = "knowledge_base"
+                        source_title = recorded.get("title", "knowledge_base")
+                        discover_payload: dict = {
+                            "evidence_id": recorded.get("evidence_id"),
+                            "source_type": source_type,
+                            "title": source_title,
+                            "path": recorded.get("path"),
+                            "evidence_level": "first_party",
+                        }
+                    else:
+                        actor = "document-analyst"
+                        source_type = "document"
+                        source_title = recorded.get("title", "document")
+                        discover_payload = {
+                            "evidence_id": recorded.get("evidence_id"),
+                            "source_type": source_type,
+                            "title": source_title,
+                            "artifact_id": recorded.get("artifact_id"),
+                            "display_name": recorded.get("display_name"),
+                            "evidence_level": "user_document",
+                        }
                     await self._publisher.publish(
                         session_id=run.session_id,
                         run_id=run_id,
                         event_type="source.discovered",
-                        actor="document-analyst",
-                        payload={
-                            "evidence_id": recorded.get("evidence_id"),
-                            "source_type": "document",
-                            "title": recorded.get("title", "document"),
-                            "evidence_level": "user_document",
-                        },
+                        actor=actor,
+                        payload=discover_payload,
                     )
                     await self._publisher.publish(
                         session_id=run.session_id,
                         run_id=run_id,
                         event_type="evidence.recorded",
-                        actor="document-analyst",
+                        actor=actor,
                         payload={
                             "evidence_id": recorded.get("evidence_id"),
+                            "source_type": source_type,
                             "locator": recorded.get("locator"),
+                            "line_start": recorded.get("line_start"),
+                            "line_end": recorded.get("line_end"),
+                            "page": recorded.get("page"),
+                            "excerpt": (recorded.get("excerpt") or "")[:200],
                         },
+                    )
+
+                if event_type == "tool.completed" and payload.get("tool_name") == "write_todos" and payload.get("items"):
+                    # deepagents 内置 write_todos 工具 → plan.updated 事件（前端 Todo 渲染）
+                    await self._publisher.publish(
+                        session_id=run.session_id,
+                        run_id=run_id,
+                        event_type="plan.updated",
+                        actor="research-orchestrator",
+                        payload={"items": payload["items"]},
                     )
 
                 if event_type == "tool.completed" and payload.get("tool_name") == "submit_research_report":

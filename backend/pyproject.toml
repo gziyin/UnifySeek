@@ -34,6 +34,11 @@ agent = [
   "langchain-deepseek==1.1.0",
   "tavily-python>=0.5",
 ]
+rag = [
+  "docling>=2.0",
+  "sentence-transformers>=3.0",
+  "chromadb>=0.5",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

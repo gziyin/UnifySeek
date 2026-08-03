@@ -9,6 +9,7 @@ from ai_dev_researcher.domain.evidence import EvidenceRecord
 from ai_dev_researcher.domain.sessions import utc_now
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.services.evidence_store import EvidenceStore
+from ai_dev_researcher.storage.chunk_locator import CharToLineIndex
 
 
 async def list_run_documents_impl(
@@ -99,6 +100,57 @@ async def record_document_evidence_impl(
     await store.add(record)
     return {
         "evidence_id": evidence_id,
+        "artifact_id": artifact_id,
+        "display_name": artifact.display_name,
         "locator": locator,
+        "line_start": line_start,
+        "line_end": line_end,
+        "page": page,
         "excerpt": store.excerpt(record, limit=240),
     }
+
+
+async def search_run_documents_impl(
+    *,
+    context: RunContext,
+    artifacts: ArtifactRepository,
+    vector_store,
+    query: str,
+    artifact_ids: list[str] | None = None,
+    top_k: int = 5,
+) -> dict:
+    """基于向量索引的语义检索：定位与 query 相关的文档片段（含行号范围）。
+
+    vector_store 为 None（RAG 依赖不可用）时返回空结果，调用方回退到
+    read_run_document 精确读取。
+    """
+    if vector_store is None:
+        return {"query": query, "results": [], "note": "vector store unavailable"}
+    target_ids = [str(item) for item in (artifact_ids or context.uploaded_artifact_ids)]
+    if not target_ids:
+        return {"query": query, "results": [], "note": "no artifacts indexed"}
+    chunks = vector_store.retrieve(query=query, artifact_ids=target_ids, top_k=top_k)
+    results = []
+    for chunk in chunks:
+        artifact = await artifacts.get(UUID(chunk.artifact_id))
+        if artifact is None or artifact.normalized_storage_path is None:
+            continue
+        path = ensure_within_root(
+            Path(artifact.normalized_storage_path),
+            context.paths.sessions_root,
+        )
+        text = path.read_text(encoding="utf-8")
+        index = CharToLineIndex.build(text)
+        line_start, line_end = index.line_range(chunk.start_char, chunk.end_char)
+        results.append(
+            {
+                "artifact_id": chunk.artifact_id,
+                "display_name": artifact.display_name,
+                "chunk_index": chunk.chunk_index,
+                "line_start": line_start,
+                "line_end": line_end,
+                "score": round(chunk.score, 4),
+                "text": chunk.text,
+            }
+        )
+    return {"query": query, "results": results}

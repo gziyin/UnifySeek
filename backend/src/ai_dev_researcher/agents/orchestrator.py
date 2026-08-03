@@ -29,11 +29,12 @@ def create_research_agent(
     model_binding: ModelBinding,
     store: EvidenceStore,
     artifacts: ArtifactRepository,
+    vector_store=None,
 ) -> CompiledStateGraph:
     register_project_profile(model_binding.spec)
     deny_all = create_deny_all_filesystem_permissions()
     web_tools = create_web_tools(context, store)
-    doc_tools = create_document_tools(context, store, artifacts)
+    doc_tools = create_document_tools(context, store, artifacts, vector_store)
     orchestrator_tools = create_orchestrator_tools(context, store, artifacts)
 
     subagents: list[SubAgent] = [

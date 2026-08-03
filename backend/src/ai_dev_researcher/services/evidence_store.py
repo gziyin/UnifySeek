@@ -29,13 +29,20 @@ class EvidenceStore:
 
     async def allocate_web_id(self) -> str:
         async with self._lock:
-            web_ids, _ = await self._repo.allocate_ids(self._run_id, web_count=1)
+            web_ids, _, _ = await self._repo.allocate_ids(self._run_id, web_count=1)
             return web_ids[0]
 
     async def allocate_document_id(self) -> str:
         async with self._lock:
-            _, doc_ids = await self._repo.allocate_ids(self._run_id, document_count=1)
+            _, doc_ids, _ = await self._repo.allocate_ids(self._run_id, document_count=1)
             return doc_ids[0]
+
+    async def allocate_knowledge_base_id(self) -> str:
+        async with self._lock:
+            _, _, kb_ids = await self._repo.allocate_ids(
+                self._run_id, knowledge_base_count=1
+            )
+            return kb_ids[0]
 
     async def add(self, record: EvidenceRecord) -> EvidenceRecord:
         self._body_dir.mkdir(parents=True, exist_ok=True)

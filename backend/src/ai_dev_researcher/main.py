@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -24,6 +25,28 @@ from ai_dev_researcher.services.task_manager import TaskManager
 from ai_dev_researcher.services.upload_service import UploadService
 from ai_dev_researcher.storage.paths import WorkspacePaths
 
+logger = logging.getLogger(__name__)
+
+
+def _try_build_vector_store(settings: Settings):
+    """依赖可用时构建 RAG 向量库；不可用返回 None（上传/检索优雅降级）。"""
+    try:
+        from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+        from ai_dev_researcher.storage.vector_store import VectorStore
+
+        persist_dir = settings.workspace_root / "vector_store"
+        provider = SentenceTransformersProvider(
+            model_name=settings.embedding_model,
+            hf_hub_cache=settings.hf_hub_cache,
+        )
+        store = VectorStore(persist_dir=persist_dir, embedding_provider=provider)
+        if not store.available:
+            return None
+        return store
+    except Exception as exc:  # noqa: BLE001 - RAG 可选，失败不阻塞启动
+        logger.warning("vector store unavailable, RAG search disabled: %s", exc)
+        return None
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
@@ -35,7 +58,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         conn = await connect(str(settings.db_path))
         await init_db(conn)
 
-        paths = WorkspacePaths(settings.sessions_root)
+        paths = WorkspacePaths(settings.sessions_root, knowledge_base_root=settings.knowledge_base_root)
         sessions_repo = SessionRepository(conn)
         runs_repo = RunRepository(conn)
         artifacts_repo = ArtifactRepository(conn)
@@ -48,6 +71,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # No publisher fanout needed for historical interrupted runs on boot.
             pass
 
+        vector_store = _try_build_vector_store(settings)
+
         def executor_factory():
             return create_run_executor(
                 settings=settings,
@@ -56,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 evidence=evidence_repo,
                 publisher=publisher,
                 paths=paths,
+                vector_store=vector_store,
             )
 
         task_manager = TaskManager(executor_factory)
@@ -75,6 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 artifacts=artifacts_repo,
                 paths=paths,
                 settings=settings,
+                vector_store=vector_store,
             ),
             run_service=RunService(
                 sessions=sessions_repo,
@@ -85,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 task_manager=task_manager,
             ),
             task_manager=task_manager,
+            vector_store=vector_store,
         )
         app.state.container = container
         try:

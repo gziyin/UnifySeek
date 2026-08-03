@@ -34,6 +34,7 @@ class AppState:
     upload_service: UploadService
     run_service: RunService
     task_manager: TaskManager
+    vector_store: object | None = None
 
 
 def get_app_state(request: Request) -> AppState:

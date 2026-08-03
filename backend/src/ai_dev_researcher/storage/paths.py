@@ -7,8 +7,9 @@ from ai_dev_researcher.core.security import ensure_within_root
 
 
 class WorkspacePaths:
-    def __init__(self, sessions_root: Path):
+    def __init__(self, sessions_root: Path, knowledge_base_root: Path | None = None):
         self.sessions_root = sessions_root
+        self.knowledge_base_root = knowledge_base_root
 
     def session_dir(self, session_id: UUID) -> Path:
         path = self.sessions_root / str(session_id)
@@ -38,6 +39,16 @@ class WorkspacePaths:
 
     def report_path(self, session_id: UUID, run_id: UUID, artifact_id: UUID) -> Path:
         return self.reports_dir(session_id, run_id) / f"{artifact_id}.md"
+
+    def knowledge_base_dir(self) -> Path:
+        if self.knowledge_base_root is None:
+            raise ValueError("knowledge_base_root is not configured")
+        return self.knowledge_base_root.resolve()
+
+    def knowledge_base_path(self, relative: str) -> Path:
+        """Resolve a knowledge-base-relative path, rejecting escapes."""
+        root = self.knowledge_base_dir()
+        return ensure_within_root(root / relative, root)
 
     def ensure_session_layout(self, session_id: UUID) -> None:
         self.uploads_dir(session_id).mkdir(parents=True, exist_ok=True)

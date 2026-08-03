@@ -87,6 +87,9 @@ async def search_web_impl(
                 "evidence_id": evidence_id,
                 "title": record.title,
                 "url": url,
+                "query": query,
+                "publisher_key": record.publisher_key,
+                "result_rank": rank,
                 "snippet": store.excerpt(record, limit=240),
                 "evidence_level": record.evidence_level,
             }
@@ -133,6 +136,7 @@ async def extract_web_sources_impl(
         updated.append(
             {
                 "evidence_id": evidence_id,
+                "url": record.canonical_url,
                 "evidence_level": upgraded.evidence_level,
                 "excerpt": store.excerpt(upgraded, limit=240),
             }
