@@ -109,8 +109,18 @@ export function ResearchWorkbench() {
     void hydrate().then(connect);
     const poll = window.setInterval(() => {
       void getRun(runId).then((fresh) => {
-        if (!disposed) {
-          setRun(fresh);
+        if (disposed) {
+          return;
+        }
+        setRun(fresh);
+        // run 到达终态后停止轮询（WS 仍保持连接，承担后续兜底）
+        if (
+          fresh.status === "succeeded" ||
+          fresh.status === "failed" ||
+          fresh.status === "interrupted" ||
+          fresh.status === "cancelled"
+        ) {
+          window.clearInterval(poll);
         }
       });
     }, 1500);
