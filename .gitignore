@@ -26,9 +26,12 @@ backend/workspace/app.db
 backend/workspace/sessions/
 backend/workspace/*.db
 backend/workspace/m1-*/
+backend/app.db
+backend/sessions/
+backend/vector_store/
 
-# 大体积测试素材（deepagents 完整仓库 1.5G，仅本地调研用，不入库）
-backend/tests/fixtures/deepagents/
+# 本地知识库（框架源码调研素材，整目录不入库）
+knowledge_base/
 
 # IDE / OS
 .idea/
