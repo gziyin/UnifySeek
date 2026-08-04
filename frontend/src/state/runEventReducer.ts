@@ -22,6 +22,8 @@ export type RunViewState = {
     excerpt?: string;
   }>;
   reportArtifactId?: string;
+  reportDegraded: boolean;
+  reportReason?: string;
 };
 
 export const initialRunViewState: RunViewState = {
@@ -30,6 +32,7 @@ export const initialRunViewState: RunViewState = {
   connection: "idle",
   todos: [],
   sources: [],
+  reportDegraded: false,
 };
 
 export type RunViewAction =
@@ -61,6 +64,8 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
       const todos = [...state.todos];
       const sources = [...state.sources];
       let reportArtifactId = state.reportArtifactId;
+      let reportDegraded = state.reportDegraded;
+      let reportReason = state.reportReason;
       for (const event of action.events) {
         if (event.type === "plan.updated" && Array.isArray(event.payload.items)) {
           todos.splice(0, todos.length, ...(event.payload.items as RunViewState["todos"]));
@@ -83,6 +88,7 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
               event.payload.excerpt != null ? String(event.payload.excerpt) : undefined,
           });
         }
+        // 契约：report.ready 事件 payload 含 artifact_id + degraded（冻结字段名，前端只做消费适配）。
         if (event.type === "report.ready" || event.type === "run.succeeded") {
           reportArtifactId = String(
             event.payload.artifact_id ?? event.payload.report_artifact_id ?? reportArtifactId ?? "",
@@ -90,6 +96,22 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
           if (!reportArtifactId) {
             reportArtifactId = undefined;
           }
+          if (event.type === "report.ready") {
+            reportDegraded = Boolean(event.payload.degraded);
+            if (event.payload.reason != null) {
+              reportReason = String(event.payload.reason);
+            }
+          }
+        }
+        // 真实后端里 report.ready 的 payload 只有 {artifact_id, degraded}，降级原因在紧随其后的
+        // submit_research_report 的 tool.completed 事件 payload.reason 中（stream_adapter 注入），
+        // 前端在此补齐 reason，保证「展开失败原因」可用（不改后端契约）。
+        if (
+          event.type === "tool.completed" &&
+          event.payload.tool_name === "submit_research_report" &&
+          event.payload.reason != null
+        ) {
+          reportReason = String(event.payload.reason);
         }
       }
       return {
@@ -99,6 +121,8 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
         todos,
         sources,
         reportArtifactId,
+        reportDegraded,
+        reportReason,
       };
     }
     default:

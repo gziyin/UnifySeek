@@ -16,6 +16,8 @@ from ai_dev_researcher.tools.knowledge_base import (
     list_knowledge_base_entries_impl,
     read_knowledge_base_file_impl,
     record_knowledge_base_evidence_impl,
+    search_knowledge_base_impl,
+    set_knowledge_index,
 )
 from ai_dev_researcher.tools.report_schema import SubmitResearchReportArgs
 from ai_dev_researcher.tools.report_submitter import (
@@ -60,7 +62,10 @@ def create_document_tools(
     store: EvidenceStore,
     artifacts: ArtifactRepository,
     vector_store=None,
+    knowledge_index=None,
 ) -> list[StructuredTool]:
+    if knowledge_index is not None:
+        set_knowledge_index(knowledge_index)
     async def list_run_documents() -> dict:
         return await list_run_documents_impl(context=context, artifacts=artifacts)
 
@@ -135,6 +140,19 @@ def create_document_tools(
             top_k=top_k,
         )
 
+    async def search_knowledge_base(
+        query: str,
+        path: str | None = None,
+        top_k: int = 10,
+        score_threshold: float = 0.0,
+    ) -> dict:
+        return await search_knowledge_base_impl(
+            query=query,
+            path=path,
+            top_k=top_k,
+            score_threshold=score_threshold,
+        )
+
     return [
         StructuredTool.from_function(
             coroutine=list_run_documents,
@@ -174,6 +192,17 @@ def create_document_tools(
             description=(
                 "Read a chunk of a local knowledge base file (relative path, e.g. "
                 "'deepagents-0.6.2/README.md'). Supported: md/txt/py/json/yaml/toml."
+            ),
+        ),
+        StructuredTool.from_function(
+            coroutine=search_knowledge_base,
+            name="search_knowledge_base",
+            description=(
+                "Semantically search the local knowledge base (framework source / "
+                "docs). Use this first to locate relevant symbols or sections, then "
+                "read_knowledge_base_file for exact context. If note is 'indexing', "
+                "the index is still being built; retry later or use "
+                "list_knowledge_base_entries + read_knowledge_base_file."
             ),
         ),
         StructuredTool.from_function(

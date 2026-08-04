@@ -26,10 +26,13 @@ def build_orchestrator_prompt(context: RunContext) -> str:
 最大网页来源数：{context.max_web_sources}
 
 工作流程（必须严格按顺序执行，禁止跳过）：
-1. 调用 search_web 2-4 次，使用不同关键词搜索与研究问题相关的网页。
-2. 调用 get_evidence_ledger，确认 ledger 中已有 evidence（如 S1、S2...）。
-3. 基于 ledger 中的证据，调用 submit_research_report 提交结构化报告。
-4. 禁止在聊天文本中直接输出最终报告；必须通过 submit_research_report。
+1. 若研究需要分析上传文档或查询本地知识库源码，必须先委托 document-analyst 子代理
+   执行（其具备文档分析与知识库检索工具，如 search_knowledge_base / read_knowledge_base_file）；
+   仅在纯网页调研场景直接使用 search_web。
+2. 调用 search_web 2-4 次，使用不同关键词搜索与研究问题相关的网页。
+3. 调用 get_evidence_ledger，确认 ledger 中已有 evidence（如 S1、S2...）。
+4. 基于 ledger 中的证据，调用 submit_research_report 提交结构化报告。
+5. 禁止在聊天文本中直接输出最终报告；必须通过 submit_research_report。
 
 规则：
 - 未调用 search_web 前，禁止调用 submit_research_report。
@@ -63,12 +66,18 @@ DOCUMENT_ANALYST_PROMPT = """你是 document-analyst 子智能体，负责分析
 - 使用 read_run_document 分块读取规范化文本。
 - 使用 record_document_evidence 记录与研究问题相关的文档证据。
 - 使用 list_knowledge_base_entries 列出本地知识库（源码/资料）目录。
+- 使用 search_knowledge_base 语义检索知识库（源码/资料）片段（先定位，再精确读取）。
 - 使用 read_knowledge_base_file 读取知识库文件（相对路径，如 deepagents-0.6.2/xxx.py）。
 - 使用 record_knowledge_base_evidence 记录知识库证据（K 类 ID）。
 
 语义检索指引：
 - 先用 search_run_documents(query, artifact_ids) 定位与研究问题相关的片段。
 - 再用 read_run_document(artifact_id, offset, limit) 精确读取上下文。
+- 知识库：先用 search_knowledge_base(query, path, top_k, score_threshold)
+  语义定位相关源码/文档片段，再用 read_knowledge_base_file(path, offset, limit)
+  精确读取上下文。若 search_knowledge_base 返回 note 为 "indexing"，说明索引
+  仍在后台构建，可稍后重试，或改用 list_knowledge_base_entries +
+  read_knowledge_base_file 直接浏览。
 - 记录证据时必须包含行号范围。
 
 规则：

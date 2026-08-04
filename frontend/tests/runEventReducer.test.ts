@@ -101,3 +101,90 @@ describe("runEventReducer sources", () => {
     expect(state.events).toHaveLength(0);
   });
 });
+
+describe("runEventReducer degraded consumption", () => {
+  it("sets reportDegraded true and keeps reason from report.ready", () => {
+    const state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent(
+          "report.ready",
+          { artifact_id: "a1", degraded: true, reason: "bad citations" },
+          1,
+        ),
+      ],
+    });
+    expect(state.reportDegraded).toBe(true);
+    expect(state.reportReason).toBe("bad citations");
+    expect(state.reportArtifactId).toBe("a1");
+  });
+
+  it("sets reportDegraded false when report.ready carries degraded false", () => {
+    const state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [makeEvent("report.ready", { artifact_id: "a1", degraded: false }, 1)],
+    });
+    expect(state.reportDegraded).toBe(false);
+    expect(state.reportArtifactId).toBe("a1");
+  });
+
+  it("defaults reportDegraded to false when degraded field is absent", () => {
+    const state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [makeEvent("report.ready", { artifact_id: "a1" }, 1)],
+    });
+    expect(state.reportDegraded).toBe(false);
+    expect(state.reportReason).toBeUndefined();
+  });
+
+  it("captures degrade reason from submit_research_report tool.completed (real backend path)", () => {
+    const state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent("report.ready", { artifact_id: "a1", degraded: true }, 1),
+        makeEvent(
+          "tool.completed",
+          {
+            tool_name: "submit_research_report",
+            artifact_id: "a1",
+            degraded: true,
+            reason: "ReportValidationError: missing evidence",
+          },
+          2,
+        ),
+      ],
+    });
+    expect(state.reportDegraded).toBe(true);
+    expect(state.reportReason).toBe("ReportValidationError: missing evidence");
+  });
+
+  it("keeps prior degraded state when run.succeeded arrives without degraded field", () => {
+    const degraded = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [makeEvent("report.ready", { artifact_id: "a1", degraded: true }, 1)],
+    });
+    const state = runEventReducer(degraded, {
+      type: "events",
+      events: [makeEvent("run.succeeded", { report_artifact_id: "a1" }, 2)],
+    });
+    expect(state.reportDegraded).toBe(true);
+    expect(state.reportArtifactId).toBe("a1");
+  });
+
+  it("reset clears degraded flags", () => {
+    const degraded = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent(
+          "report.ready",
+          { artifact_id: "a1", degraded: true, reason: "bad citations" },
+          1,
+        ),
+      ],
+    });
+    const state = runEventReducer(degraded, { type: "reset" });
+    expect(state.reportDegraded).toBe(false);
+    expect(state.reportReason).toBeUndefined();
+    expect(state.reportArtifactId).toBeUndefined();
+  });
+});

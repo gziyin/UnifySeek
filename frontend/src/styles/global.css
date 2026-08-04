@@ -40,6 +40,12 @@ a {
   min-height: 70vh;
 }
 
+/* 修复横向溢出：grid/panel 子项默认 min-width:auto，会被长 URL/摘录/代码撑破列宽。
+   对直接子列容器、panel、时间线、账本、报告都补 min-width:0，允许内容在其内部收缩换行。 */
+.workbench > * {
+  min-width: 0;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -48,6 +54,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  min-width: 0;
 }
 
 .panel h2 {
@@ -135,9 +142,17 @@ textarea {
 .report {
   overflow: auto;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   max-height: calc(100vh - 320px);
   padding-right: 0.25rem;
+}
+
+/* 展开详情独立滚动，不再撑开卡片/列宽 */
+.timeline-detail {
+  max-height: 260px;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .timeline-item,
@@ -323,6 +338,101 @@ textarea {
   line-height: 1.65;
 }
 
+/* ---- 降级报告温和提示 ---- */
+.report-banner {
+  border: 1px solid #e2c792;
+  background: #fbf3e2;
+  color: #6b4d12;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.9rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.report-banner p {
+  margin: 0;
+}
+
+.report-reason-toggle {
+  justify-self: start;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.82rem;
+  border-color: #e2c792;
+  color: #8a5a17;
+}
+
+.report-reason {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  background: #fff;
+  border: 1px solid var(--line);
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 200px;
+  overflow: auto;
+}
+
+/* ---- 报告预览模态框 ---- */
+.report-preview-modal {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  background: var(--panel);
+  padding: 0;
+  min-width: min(720px, 90vw);
+  max-width: 90vw;
+  width: min(90vw, 900px);
+  height: min(80vh, 720px);
+}
+
+.report-preview-modal::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.report-preview-modal[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.report-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.report-preview-head h2 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 1.15rem;
+}
+
+.report-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.1rem 1.3rem;
+  line-height: 1.65;
+}
+
+.report-preview-body h1,
+.report-preview-body h2,
+.report-preview-body h3 {
+  font-family: var(--serif);
+}
+
+.report-preview-body pre {
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+}
+
+.report-preview-body img {
+  max-width: 100%;
+}
+
 .upload-list {
   list-style: none;
   margin: 0;
@@ -336,16 +446,6 @@ textarea {
   justify-content: space-between;
   gap: 0.5rem;
   font-size: 0.9rem;
-}
-
-.report-body {
-  line-height: 1.65;
-}
-
-.report-body h1,
-.report-body h2,
-.report-body h3 {
-  font-family: var(--serif);
 }
 
 .error-text {

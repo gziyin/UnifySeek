@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -28,23 +29,59 @@ from ai_dev_researcher.storage.paths import WorkspacePaths
 logger = logging.getLogger(__name__)
 
 
-def _try_build_vector_store(settings: Settings):
+def _try_build_vector_store(settings: Settings, provider=None):
     """依赖可用时构建 RAG 向量库；不可用返回 None（上传/检索优雅降级）。"""
     try:
-        from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+        if provider is None:
+            from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+
+            provider = SentenceTransformersProvider(
+                model_name=settings.embedding_model,
+                hf_hub_cache=settings.hf_hub_cache,
+            )
         from ai_dev_researcher.storage.vector_store import VectorStore
 
         persist_dir = settings.workspace_root / "vector_store"
-        provider = SentenceTransformersProvider(
-            model_name=settings.embedding_model,
-            hf_hub_cache=settings.hf_hub_cache,
-        )
         store = VectorStore(persist_dir=persist_dir, embedding_provider=provider)
         if not store.available:
             return None
         return store
     except Exception as exc:  # noqa: BLE001 - RAG 可选，失败不阻塞启动
         logger.warning("vector store unavailable, RAG search disabled: %s", exc)
+        return None
+
+
+def _try_build_knowledge_index(settings: Settings, provider=None) -> object | None:
+    """构建知识库语义索引并注册；不可用/未就绪时返回 None。
+
+    索引在后台异步重建（见 lifespan），不阻塞 API 启动；未就绪时
+    ``search_knowledge_base`` 工具返回 ``{"results": [], "note": "indexing"}``。
+    """
+    try:
+        if settings.fake_agent_mode:
+            return None
+        kb_root = settings.knowledge_base_root
+        if kb_root is None or not kb_root.exists():
+            return None
+        if provider is None:
+            from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+
+            provider = SentenceTransformersProvider(
+                model_name=settings.embedding_model,
+                hf_hub_cache=settings.hf_hub_cache,
+            )
+        from ai_dev_researcher.storage.knowledge_index import KnowledgeIndex
+        from ai_dev_researcher.tools.knowledge_base import set_knowledge_index
+
+        index = KnowledgeIndex(
+            kb_root=kb_root,
+            persist_dir=settings.workspace_root / "vector_store",
+            embedding_provider=provider,
+        )
+        set_knowledge_index(index)
+        return index
+    except Exception as exc:  # noqa: BLE001 - KB RAG 可选，失败不阻塞启动
+        logger.warning("knowledge index unavailable, KB search disabled: %s", exc)
         return None
 
 
@@ -71,7 +108,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # No publisher fanout needed for historical interrupted runs on boot.
             pass
 
-        vector_store = _try_build_vector_store(settings)
+        provider = None
+        try:
+            from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+
+            provider = SentenceTransformersProvider(
+                model_name=settings.embedding_model,
+                hf_hub_cache=settings.hf_hub_cache,
+            )
+        except Exception as exc:  # noqa: BLE001 - embedding 可选，失败不影响启动
+            logger.warning("embedding provider unavailable: %s", exc)
+
+        vector_store = _try_build_vector_store(settings, provider)
+        knowledge_index = _try_build_knowledge_index(settings, provider)
+
+        # 索引后台异步构建，不阻塞 API 启动；失败仅置为未就绪（工具返回 indexing 提示）。
+        kb_build_task: asyncio.Task | None = None
+        if knowledge_index is not None:
+
+            async def _build_kb_background() -> None:
+                try:
+                    await asyncio.to_thread(knowledge_index.rebuild)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("knowledge index background build failed: %s", exc)
+
+            kb_build_task = asyncio.create_task(_build_kb_background())
 
         def executor_factory():
             return create_run_executor(
@@ -113,11 +176,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
             task_manager=task_manager,
             vector_store=vector_store,
+            knowledge_index=knowledge_index,
         )
         app.state.container = container
         try:
             yield
         finally:
+            if kb_build_task is not None:
+                kb_build_task.cancel()
             await task_manager.shutdown()
             await conn.close()
 

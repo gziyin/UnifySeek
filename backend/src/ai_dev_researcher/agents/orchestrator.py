@@ -30,11 +30,18 @@ def create_research_agent(
     store: EvidenceStore,
     artifacts: ArtifactRepository,
     vector_store=None,
+    knowledge_index=None,
 ) -> CompiledStateGraph:
+    """Create the DeepAgents research graph.
+
+    ``knowledge_index`` is optional and backward compatible: when omitted the
+    behavior is unchanged (the document-analyst's search_knowledge_base tool
+    simply reports note="indexing" until a shared index is registered).
+    """
     register_project_profile(model_binding.spec)
     deny_all = create_deny_all_filesystem_permissions()
     web_tools = create_web_tools(context, store)
-    doc_tools = create_document_tools(context, store, artifacts, vector_store)
+    doc_tools = create_document_tools(context, store, artifacts, vector_store, knowledge_index)
     orchestrator_tools = create_orchestrator_tools(context, store, artifacts)
 
     subagents: list[SubAgent] = [

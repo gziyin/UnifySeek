@@ -222,13 +222,17 @@ export function ResearchWorkbench() {
           />
           <UploadPanel artifacts={artifacts} disabled={!sessionId || active} onUpload={handleUpload} />
         </div>
-        <AgentTimeline state={view} />
         <div style={{ display: "grid", gap: "1rem", alignContent: "start" }}>
-          <SourceLedger sources={view.sources} />
+          <AgentTimeline state={view} />
           <ReportViewer
             markdown={reportMarkdown}
             artifactId={view.reportArtifactId ?? run?.report_artifact_id ?? undefined}
+            degraded={view.reportDegraded}
+            reason={view.reportReason}
           />
+        </div>
+        <div style={{ display: "grid", gap: "1rem", alignContent: "start" }}>
+          <SourceLedger sources={view.sources} />
         </div>
       </div>
     </div>

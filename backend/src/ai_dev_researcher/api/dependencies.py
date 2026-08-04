@@ -35,6 +35,7 @@ class AppState:
     run_service: RunService
     task_manager: TaskManager
     vector_store: object | None = None
+    knowledge_index: object | None = None
 
 
 def get_app_state(request: Request) -> AppState:

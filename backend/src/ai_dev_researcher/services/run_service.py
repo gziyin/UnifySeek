@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from ai_dev_researcher.core.errors import (
@@ -9,13 +10,15 @@ from ai_dev_researcher.core.errors import (
 )
 from ai_dev_researcher.domain.artifacts import ArtifactKind
 from ai_dev_researcher.domain.runs import ResearchRequest, Run, RunStatus, TERMINAL_RUN_STATUSES
-from ai_dev_researcher.domain.sessions import utc_now
+from ai_dev_researcher.domain.sessions import make_slug, utc_now
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.repositories.runs import RunRepository
 from ai_dev_researcher.repositories.sessions import SessionRepository
 from ai_dev_researcher.services.event_publisher import EventPublisher
 from ai_dev_researcher.services.task_manager import TaskManager
 from ai_dev_researcher.storage.paths import WorkspacePaths
+
+logger = logging.getLogger(__name__)
 
 
 class RunService:
@@ -57,10 +60,34 @@ class RunService:
 
         run = Run(session_id=session_id, request=request, status=RunStatus.PENDING)
         await self._runs.create(run)
-        self._paths.ensure_run_layout(session_id, run.run_id)
+        display_name = await self._resolve_display_name(session, request)
+        self._paths.ensure_run_layout(session_id, run.run_id, display_name=display_name)
         await self._sessions.touch(session_id)
         await self._task_manager.start_run(run.run_id)
         return run
+
+    async def _resolve_display_name(self, session, request: ResearchRequest) -> str | None:
+        """Resolve the display name used to name the session directory.
+
+        First run (session has no display name yet): derive the slug from the
+        research question and persist it so the directory is created as
+        ``<slug>-<8位短uuid>``. Naming failure must never block run creation,
+        so on error we fall back to ``None`` (legacy UUID directory) and log.
+
+        Later runs keep the already-persisted display name (sticky).
+        """
+        if session.display_name:
+            return session.display_name
+        if not request.question:
+            return None
+        slug = make_slug(request.question)
+        try:
+            updated = await self._sessions.update_display_name(session.session_id, slug)
+            if updated is not None:
+                return updated.display_name
+        except Exception:  # noqa: BLE001 - naming must not block run creation
+            logger.exception("failed to set session display_name for %s", session.session_id)
+        return None
 
     async def get_run(self, run_id: UUID) -> Run:
         run = await self._runs.get(run_id)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ai_dev_researcher.agents.context import RunContext
 from ai_dev_researcher.core.errors import KnowledgeBaseError
@@ -9,7 +11,80 @@ from ai_dev_researcher.domain.evidence import EvidenceRecord
 from ai_dev_researcher.domain.sessions import utc_now
 from ai_dev_researcher.services.evidence_store import EvidenceStore
 
+if TYPE_CHECKING:
+    from ai_dev_researcher.storage.knowledge_index import KbChunk, KnowledgeIndex
+
+logger = logging.getLogger(__name__)
+
 SUPPORTED_KB_EXTENSIONS = {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".toml"}
+
+# ---------------------------------------------------------------------------
+# Knowledge index registry (WP-A)
+#
+# ``search_knowledge_base`` needs the shared KnowledgeIndex instance, but the
+# run-time wiring (main -> run executor -> orchestrator -> subagent) crosses
+# files owned by other work packages, so the index is registered here as a
+# lightweight service locator. Both ``main.py`` and
+# ``create_research_agent(..., knowledge_index=...)`` register the same
+# instance via :func:`set_knowledge_index`.
+# ---------------------------------------------------------------------------
+
+_kb_index: "KnowledgeIndex | None" = None
+
+
+def set_knowledge_index(index) -> None:
+    """Register the shared knowledge base index (or pass None to clear it)."""
+    global _kb_index
+    _kb_index = index
+
+
+def get_knowledge_index():
+    """Return the registered knowledge base index (may be None)."""
+    return _kb_index
+
+
+async def search_knowledge_base_impl(
+    query: str,
+    path: str | None = None,
+    top_k: int = 10,
+    score_threshold: float = 0.0,
+) -> dict:
+    """Semantically search the local knowledge base (WP-A contract).
+
+    Returns ``{"results": [], "note": "indexing"}`` when the index is not
+    ready yet, so agents get a gentle hint instead of a hard error.
+    """
+    index = get_knowledge_index()
+    if index is None or not index.is_ready:
+        return {"results": [], "note": "indexing"}
+    safe_path: str | None = None
+    if path is not None:
+        safe_path = str(path).strip().replace("\\", "/")
+        if (
+            not safe_path
+            or safe_path.startswith("/")
+            or safe_path.startswith("..")
+            or "://" in safe_path
+            or (len(safe_path) >= 2 and safe_path[1] == ":")
+        ):
+            return {"results": [], "note": "invalid_path"}
+    top_k = max(1, min(int(top_k), 50))
+    score_threshold = max(0.0, float(score_threshold))
+    try:
+        chunks = index.retrieve(
+            query=query,
+            path=safe_path,
+            top_k=top_k,
+            score_threshold=score_threshold,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("knowledge base search failed: %s", exc)
+        return {"results": [], "note": "error"}
+    return {
+        "results": [chunk.to_dict() for chunk in chunks],
+        "count": len(chunks),
+        "note": "ok",
+    }
 
 
 def _kb_root(context: RunContext) -> Path:

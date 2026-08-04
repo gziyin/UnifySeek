@@ -47,7 +47,7 @@ ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
 
 
 class ResearchRequest(BaseModel):
-    question: str = Field(min_length=10, max_length=4000)
+    question: str = Field(min_length=10)
     constraints: list[str] = Field(default_factory=list, max_length=10)
     focus_areas: list[str] = Field(default_factory=list, max_length=10)
     max_web_sources: int = Field(default=8, ge=3, le=15)
