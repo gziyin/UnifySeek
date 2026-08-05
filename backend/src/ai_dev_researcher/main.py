@@ -39,6 +39,7 @@ def _try_build_vector_store(settings: Settings, provider=None):
             provider = SentenceTransformersProvider(
                 model_name=settings.embedding_model,
                 hf_hub_cache=settings.hf_hub_cache,
+                embedding_offline=settings.embedding_offline,
             )
         from ai_dev_researcher.storage.vector_store import VectorStore
 
@@ -70,6 +71,7 @@ def _try_build_knowledge_index(settings: Settings, provider=None) -> object | No
             provider = SentenceTransformersProvider(
                 model_name=settings.embedding_model,
                 hf_hub_cache=settings.hf_hub_cache,
+                embedding_offline=settings.embedding_offline,
             )
         from ai_dev_researcher.storage.knowledge_index import KnowledgeIndex
 
@@ -114,6 +116,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             provider = SentenceTransformersProvider(
                 model_name=settings.embedding_model,
                 hf_hub_cache=settings.hf_hub_cache,
+                embedding_offline=settings.embedding_offline,
             )
         except Exception as exc:  # noqa: BLE001 - embedding 可选，失败不影响启动
             logger.warning("embedding provider unavailable: %s", exc)
