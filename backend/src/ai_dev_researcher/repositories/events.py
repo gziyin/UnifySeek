@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
 from datetime import datetime
 from uuid import UUID
 
@@ -10,8 +12,11 @@ from ai_dev_researcher.domain.events import EventType, ResearchEvent
 
 
 class EventRepository:
+    _MAX_SEQ_RETRIES = 5
+
     def __init__(self, conn: aiosqlite.Connection):
         self._conn = conn
+        self._seq_lock = asyncio.Lock()
 
     async def next_seq(self, run_id: UUID) -> int:
         cursor = await self._conn.execute(
@@ -38,36 +43,45 @@ class EventRepository:
         actor: str,
         payload: dict,
     ) -> ResearchEvent:
-        seq = await self.next_seq(run_id)
-        event = ResearchEvent(
-            seq=seq,
-            session_id=session_id,
-            run_id=run_id,
-            type=event_type,
-            actor=actor,
-            payload=payload,
-        )
-        await self._conn.execute(
-            """
-            INSERT INTO events (
-                event_id, run_id, session_id, seq, type, occurred_at,
-                actor, protocol_version, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(event.event_id),
-                str(event.run_id),
-                str(event.session_id),
-                event.seq,
-                event.type,
-                event.occurred_at.isoformat(),
-                event.actor,
-                event.protocol_version,
-                json.dumps(event.payload, ensure_ascii=False),
-            ),
-        )
-        await self._conn.commit()
-        return event
+        # Serialize seq computation + insert within one process, and retry on
+        # UNIQUE(run_id, seq) collisions as a defensive path for other writers.
+        async with self._seq_lock:
+            for attempt in range(self._MAX_SEQ_RETRIES):
+                seq = await self.next_seq(run_id)
+                event = ResearchEvent(
+                    seq=seq,
+                    session_id=session_id,
+                    run_id=run_id,
+                    type=event_type,
+                    actor=actor,
+                    payload=payload,
+                )
+                try:
+                    await self._conn.execute(
+                        """
+                        INSERT INTO events (
+                            event_id, run_id, session_id, seq, type, occurred_at,
+                            actor, protocol_version, payload_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(event.event_id),
+                            str(event.run_id),
+                            str(event.session_id),
+                            event.seq,
+                            event.type,
+                            event.occurred_at.isoformat(),
+                            event.actor,
+                            event.protocol_version,
+                            json.dumps(event.payload, ensure_ascii=False),
+                        ),
+                    )
+                    await self._conn.commit()
+                    return event
+                except sqlite3.IntegrityError:
+                    await self._conn.rollback()
+                    if attempt == self._MAX_SEQ_RETRIES - 1:
+                        raise
 
     def _row_to_event(self, row: aiosqlite.Row) -> ResearchEvent:
         return ResearchEvent(
