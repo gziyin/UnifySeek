@@ -38,12 +38,42 @@ REM    NOT the /D dir. So use the absolute python path here.
 echo [start] Backend : http://127.0.0.1:%APP_PORT%
 start "ai-dev-researcher-backend" /D "%~dp0backend" "%~dp0backend\.venv\Scripts\python.exe" -m ai_dev_researcher.main
 
-REM 5. Start frontend.
-REM    Inject VITE_BACKEND_PORT so vite.config.ts proxies /api and /ws
-REM    to the same port as the backend (avoids 8000 hardcode mismatch).
+REM 5. Check frontend tooling.
+where node.exe >nul 2>nul
+if errorlevel 1 (
+    echo [error] node.exe not found in PATH. Install Node.js first.
+    pause
+    exit /b 1
+)
+where npm.cmd >nul 2>nul
+if errorlevel 1 (
+    echo [error] npm.cmd not found in PATH. Install Node.js first.
+    pause
+    exit /b 1
+)
+
+REM 6. Start frontend.
+REM    Explicit cd /d and npm.cmd avoid relying on start /D and on a
+REM    bare npm that may resolve to the extensionless bash wrapper.
 set "VITE_BACKEND_PORT=%APP_PORT%"
+set "FRONTEND_DIR=%~dp0frontend"
 echo [start] Frontend: http://127.0.0.1:5173
-start "ai-dev-researcher-frontend" /D "%~dp0frontend" cmd /k "npm run dev"
+start "ai-dev-researcher-frontend" /D "%FRONTEND_DIR%" "%ComSpec%" /k "cd /d "%FRONTEND_DIR%" && npm.cmd run dev"
+
+REM 7. Wait for the frontend to become ready.
+echo [wait] Waiting for Frontend on http://127.0.0.1:5173 ...
+for /l %%i in (1,1,10) do (
+    curl.exe -fsS --max-time 1 http://127.0.0.1:5173/ >nul 2>nul
+    if not errorlevel 1 goto frontend_ready
+    ping -n 2 127.0.0.1 >nul
+)
+echo [error] Frontend did not become ready on http://127.0.0.1:5173
+echo [error] Check the ai-dev-researcher-frontend window for npm/vite output.
+pause
+exit /b 1
+
+:frontend_ready
+echo [ok] Frontend ready: http://127.0.0.1:5173
 
 echo.
 echo [done] Backend : http://127.0.0.1:%APP_PORT%  (from backend\.env APP_PORT)
