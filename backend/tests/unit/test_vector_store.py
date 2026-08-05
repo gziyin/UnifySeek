@@ -112,3 +112,85 @@ def test_reindex_same_artifact_replaces(tmp_path: Path):
     results = store.retrieve(query="second", artifact_ids=["a"], top_k=5)
     assert results
     assert all(c.artifact_id == "a" for c in results)
+
+# --- Issue #8: offline embedding cache control --------------------------------
+
+def test_model_cache_dir_names_bare_and_org():
+    from ai_dev_researcher.storage.embedding_provider import _model_cache_dir_names
+
+    assert _model_cache_dir_names("all-MiniLM-L6-v2") == ["models--all-MiniLM-L6-v2"]
+    assert _model_cache_dir_names("sentence-transformers/all-MiniLM-L6-v2") == [
+        "models--sentence-transformers--all-MiniLM-L6-v2"
+    ]
+
+
+def test_sentence_transformers_provider_cache_presence(tmp_path: Path):
+    from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+
+    cache = tmp_path / "hf-cache"
+    (cache / "models--all-MiniLM-L6-v2").mkdir(parents=True)
+    provider = SentenceTransformersProvider(model_name="all-MiniLM-L6-v2", hf_hub_cache=str(cache))
+    assert provider._model_cache_dir_exists(str(cache), "all-MiniLM-L6-v2") is True
+    assert provider._model_cache_dir_exists(str(cache), "other-model") is False
+    assert provider._model_cache_dir_exists("", "all-MiniLM-L6-v2") is False
+
+
+def test_offline_missing_cache_fails_fast(tmp_path: Path, monkeypatch):
+    from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+
+    cache = tmp_path / "hf-cache"
+    cache.mkdir()
+    provider = SentenceTransformersProvider(
+        model_name="all-MiniLM-L6-v2",
+        hf_hub_cache=str(cache),
+        embedding_offline=True,
+    )
+    with pytest.raises(RuntimeError, match="all-MiniLM-L6-v2"):
+        provider._ensure_model()
+    # 失败是"快速失败"路径：不应把会话标记为可在线下载。
+    assert provider._model is None
+
+
+def test_env_hf_offline_missing_cache_fails_fast(tmp_path: Path, monkeypatch):
+    from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    cache = tmp_path / "hf-cache"
+    cache.mkdir()
+    provider = SentenceTransformersProvider(model_name="all-MiniLM-L6-v2", hf_hub_cache=str(cache))
+    with pytest.raises(RuntimeError, match="all-MiniLM-L6-v2"):
+        provider._ensure_model()
+
+
+def test_offline_with_local_cache_loads_and_sets_hf_offline(tmp_path: Path, monkeypatch):
+    import os
+    import sys
+    import types
+
+    from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+
+    cache = tmp_path / "hf-cache"
+    (cache / "models--sentence-transformers--all-MiniLM-L6-v2").mkdir(parents=True)
+
+    fake_st = types.ModuleType("sentence_transformers")
+
+    class FakeModel:
+        def __init__(self, name: str):
+            self._name = name
+
+        def get_sentence_embedding_dimension(self) -> int:
+            return 384
+
+    fake_st.SentenceTransformer = FakeModel
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_st)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+
+    provider = SentenceTransformersProvider(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        hf_hub_cache=str(cache),
+        embedding_offline=True,
+    )
+    provider._ensure_model()
+    assert provider._model is not None
+    assert os.environ.get("HF_HUB_OFFLINE") == "1"
+    assert provider.dimension == 384
