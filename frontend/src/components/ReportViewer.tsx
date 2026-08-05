@@ -43,7 +43,7 @@ export function ReportViewer({ markdown, artifactId, degraded = false, reason }:
   }, [previewOpen]);
 
   return (
-    <section className="panel">
+    <section className="panel report-panel">
       <div className="actions" style={{ justifyContent: "space-between" }}>
         <h2>研究报告</h2>
         <div className="actions">
