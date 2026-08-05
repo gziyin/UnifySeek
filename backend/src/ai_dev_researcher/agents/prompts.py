@@ -11,6 +11,7 @@ def build_orchestrator_prompt(context: RunContext) -> str:
         if context.uploaded_artifact_ids
         else "无"
     )
+    knowledge_context = context.knowledge_context.strip()
     return f"""你是 AI 开发技术深度调研主编排智能体。
 
 研究问题：
@@ -24,6 +25,9 @@ def build_orchestrator_prompt(context: RunContext) -> str:
 
 授权上传资料 artifact IDs：{uploads}
 最大网页来源数：{context.max_web_sources}
+
+本地知识库预检索片段（已确定性写入证据账本，非模型委托）：
+{knowledge_context or "- 无预检知识库片段"}
 
 工作流程（必须严格按顺序执行，禁止跳过）：
 1. 若研究需要分析上传文档或查询本地知识库源码，必须先委托 document-analyst 子代理

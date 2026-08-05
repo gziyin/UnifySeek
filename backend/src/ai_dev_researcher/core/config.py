@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     tavily_api_key: str = ""
 
+    # Agent D budget 护栏：0 表示不限制；可由 .env / 环境变量覆盖，也可在 run constraints 中传。
+    agent_max_tool_calls: int = 60
+    agent_max_elapsed_seconds: float = 600.0
+    kb_prefetch_top_k: int = 5
+    kb_prefetch_enabled: bool = True
+
     # Phase-1 vertical slice uses a fake executor until DeepAgents is wired.
     fake_agent_mode: bool = True
 
