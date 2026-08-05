@@ -30,10 +30,22 @@ class Settings(BaseSettings):
     # 为空时使用 huggingface 默认缓存（~/.cache/huggingface/hub）。
     hf_hub_cache: str = ""
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # embedding 离线模式：为 true 时若 HF 缓存缺失则快速失败（不联网下载/5 次重试）。
+    # 也可通过环境变量 HF_HUB_OFFLINE=1 临时开启。
+    embedding_offline: bool = False
+    # 预留：本地 GGUF embedding 模型路径（Qwen3-Embedding-0.6B-GGUF 离线候选）。
+    # 当前未接入，留空即不启用。
+    gguf_embedding_model_path: str = ""
 
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
     tavily_api_key: str = ""
+
+    # Agent D budget 护栏：0 表示不限制；可由 .env / 环境变量覆盖，也可在 run constraints 中传。
+    agent_max_tool_calls: int = 60
+    agent_max_elapsed_seconds: float = 600.0
+    kb_prefetch_top_k: int = 5
+    kb_prefetch_enabled: bool = True
 
     # Phase-1 vertical slice uses a fake executor until DeepAgents is wired.
     fake_agent_mode: bool = True

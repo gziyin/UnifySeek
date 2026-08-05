@@ -18,8 +18,9 @@ from ai_dev_researcher.repositories.evidence import EvidenceRepository
 from ai_dev_researcher.repositories.runs import RunRepository
 from ai_dev_researcher.repositories.sessions import SessionRepository
 from ai_dev_researcher.repositories.sqlite import connect, init_db
+from ai_dev_researcher.services.agent_executor import AgentResearchExecutor
 from ai_dev_researcher.services.event_publisher import EventPublisher
-from ai_dev_researcher.services.executor_factory import create_run_executor
+from ai_dev_researcher.services.fake_executor import FakeResearchExecutor
 from ai_dev_researcher.services.run_service import RunService
 from ai_dev_researcher.services.session_service import SessionService
 from ai_dev_researcher.services.task_manager import TaskManager
@@ -71,14 +72,12 @@ def _try_build_knowledge_index(settings: Settings, provider=None) -> object | No
                 hf_hub_cache=settings.hf_hub_cache,
             )
         from ai_dev_researcher.storage.knowledge_index import KnowledgeIndex
-        from ai_dev_researcher.tools.knowledge_base import set_knowledge_index
 
         index = KnowledgeIndex(
             kb_root=kb_root,
             persist_dir=settings.workspace_root / "vector_store",
             embedding_provider=provider,
         )
-        set_knowledge_index(index)
         return index
     except Exception as exc:  # noqa: BLE001 - KB RAG 可选，失败不阻塞启动
         logger.warning("knowledge index unavailable, KB search disabled: %s", exc)
@@ -137,7 +136,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             kb_build_task = asyncio.create_task(_build_kb_background())
 
         def executor_factory():
-            return create_run_executor(
+            if settings.fake_agent_mode or not settings.deepseek_api_key:
+                return FakeResearchExecutor(
+                    runs=runs_repo,
+                    artifacts=artifacts_repo,
+                    evidence=evidence_repo,
+                    publisher=publisher,
+                    paths=paths,
+                )
+            return AgentResearchExecutor(
                 settings=settings,
                 runs=runs_repo,
                 artifacts=artifacts_repo,
@@ -145,6 +152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 publisher=publisher,
                 paths=paths,
                 vector_store=vector_store,
+                knowledge_index=knowledge_index,
             )
 
         task_manager = TaskManager(executor_factory)

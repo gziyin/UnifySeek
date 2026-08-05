@@ -18,3 +18,6 @@ class RunContext:
     settings: Settings
     constraints: list[str] = field(default_factory=list)
     focus_areas: list[str] = field(default_factory=list)
+    max_tool_calls: int = 0
+    max_elapsed_seconds: float = 0.0
+    knowledge_context: str = ''

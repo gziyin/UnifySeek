@@ -17,7 +17,6 @@ from ai_dev_researcher.tools.knowledge_base import (
     read_knowledge_base_file_impl,
     record_knowledge_base_evidence_impl,
     search_knowledge_base_impl,
-    set_knowledge_index,
 )
 from ai_dev_researcher.tools.report_schema import SubmitResearchReportArgs
 from ai_dev_researcher.tools.report_submitter import (
@@ -64,8 +63,6 @@ def create_document_tools(
     vector_store=None,
     knowledge_index=None,
 ) -> list[StructuredTool]:
-    if knowledge_index is not None:
-        set_knowledge_index(knowledge_index)
     async def list_run_documents() -> dict:
         return await list_run_documents_impl(context=context, artifacts=artifacts)
 
@@ -151,6 +148,7 @@ def create_document_tools(
             path=path,
             top_k=top_k,
             score_threshold=score_threshold,
+            knowledge_index=knowledge_index,
         )
 
     return [
@@ -255,7 +253,7 @@ def create_orchestrator_tools(
         return await submit_research_report_impl(
             store=store,
             artifacts=artifacts,
-            sessions_root=context.paths.sessions_root,
+            paths=context.paths,
             session_id=context.session_id,
             run_id=context.run_id,
             report_data=report_data,

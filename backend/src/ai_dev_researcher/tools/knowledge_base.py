@@ -18,28 +18,20 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_KB_EXTENSIONS = {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".toml"}
 
-# ---------------------------------------------------------------------------
-# Knowledge index registry (WP-A)
-#
-# ``search_knowledge_base`` needs the shared KnowledgeIndex instance, but the
-# run-time wiring (main -> run executor -> orchestrator -> subagent) crosses
-# files owned by other work packages, so the index is registered here as a
-# lightweight service locator. Both ``main.py`` and
-# ``create_research_agent(..., knowledge_index=...)`` register the same
-# instance via :func:`set_knowledge_index`.
-# ---------------------------------------------------------------------------
-
+# Deprecated compatibility API for out-of-domain tests. Production wiring now
+# passes the index explicitly through factory/executor; new code should not
+# call set/get_knowledge_index.
 _kb_index: "KnowledgeIndex | None" = None
 
 
 def set_knowledge_index(index) -> None:
-    """Register the shared knowledge base index (or pass None to clear it)."""
-    global _kb_index
+    """Legacy test-only locator; use explicit DI in application code."""
+    global _kb_index  # noqa: PLW0603
     _kb_index = index
 
 
 def get_knowledge_index():
-    """Return the registered knowledge base index (may be None)."""
+    """Legacy test-only locator; prefer explicit DI."""
     return _kb_index
 
 
@@ -48,13 +40,14 @@ async def search_knowledge_base_impl(
     path: str | None = None,
     top_k: int = 10,
     score_threshold: float = 0.0,
+    knowledge_index: "KnowledgeIndex | None" = None,
 ) -> dict:
     """Semantically search the local knowledge base (WP-A contract).
 
     Returns ``{"results": [], "note": "indexing"}`` when the index is not
     ready yet, so agents get a gentle hint instead of a hard error.
     """
-    index = get_knowledge_index()
+    index = knowledge_index if knowledge_index is not None else get_knowledge_index()
     if index is None or not index.is_ready:
         return {"results": [], "note": "indexing"}
     safe_path: str | None = None
@@ -85,7 +78,6 @@ async def search_knowledge_base_impl(
         "count": len(chunks),
         "note": "ok",
     }
-
 
 def _kb_root(context: RunContext) -> Path:
     root = context.settings.knowledge_base_root
