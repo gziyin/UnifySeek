@@ -255,7 +255,7 @@ def create_orchestrator_tools(
         return await submit_research_report_impl(
             store=store,
             artifacts=artifacts,
-            sessions_root=context.paths.sessions_root,
+            paths=context.paths,
             session_id=context.session_id,
             run_id=context.run_id,
             report_data=report_data,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -48,7 +48,7 @@ async def env(tmp_path: Path):
         paths=paths,
     )
     artifacts = ArtifactRepository(conn)
-    yield store, artifacts, paths.sessions_root, session_id, run_id
+    yield store, artifacts, paths, session_id, run_id
     await conn.close()
 
 
@@ -70,11 +70,11 @@ async def _add_web_evidence(store: EvidenceStore, *, level: str = "search_snippe
 
 
 async def _submit(env, report: dict) -> dict:
-    store, artifacts, sessions_root, session_id, run_id = env
+    store, artifacts, paths, session_id, run_id = env
     return await submit_research_report_impl(
         store=store,
         artifacts=artifacts,
-        sessions_root=sessions_root,
+        paths=paths,
         session_id=session_id,
         run_id=run_id,
         report_data=report,
@@ -105,20 +105,26 @@ async def test_duplicate_citation_degrades(env):
     assert "more than once" in (result["reason"] or "")
 
 
-async def test_high_confidence_snippet_only_degrades(env):
-    store = env[0]
+async def test_high_confidence_snippet_only_auto_degrades_to_medium(env):
+    store, artifacts, paths, session_id, run_id = env
     web_id = await _add_web_evidence(store, level="search_snippet")
     result = await _submit(env, _report(claims=[_claim("C1", [web_id], "high")]))
-    assert result["degraded"] is True
-    assert "only search snippets" in (result["reason"] or "")
+    assert result["degraded"] is False
+    assert result["reason"] is None
+    artifact = await artifacts.get(UUID(result["artifact_id"]))
+    content = Path(artifact.original_storage_path).read_text(encoding="utf-8")
+    assert "confidence=medium" in content
 
 
-async def test_high_confidence_weak_secondary_degrades(env):
-    store = env[0]
+async def test_high_confidence_weak_secondary_auto_degrades_to_medium(env):
+    store, artifacts, paths, session_id, run_id = env
     web_id = await _add_web_evidence(store, level="secondary")
     result = await _submit(env, _report(claims=[_claim("C1", [web_id], "high")]))
-    assert result["degraded"] is True
-    assert "without first-party" in (result["reason"] or "")
+    assert result["degraded"] is False
+    assert result["reason"] is None
+    artifact = await artifacts.get(UUID(result["artifact_id"]))
+    content = Path(artifact.original_storage_path).read_text(encoding="utf-8")
+    assert "confidence=medium" in content
 
 
 async def test_medium_confidence_secondary_passes(env):
@@ -144,3 +150,54 @@ async def test_disagreement_unknown_citation_degrades(env):
     result = await _submit(env, _report(claims=[_claim("C1", [web_id], "low")], disagreements=disagreements))
     assert result["degraded"] is True
     assert "disagreement" in (result["reason"] or "")
+
+
+async def test_report_lands_in_slug_session_dir(tmp_path: Path):
+    """Issue 9: report lands inside the slug session dir, no separate UUID dir."""
+    settings = type("S", (), {"workspace_root": tmp_path / "workspace"})()
+    settings.workspace_root.mkdir(parents=True, exist_ok=True)
+    paths = WorkspacePaths(settings.workspace_root)
+    conn = await connect(str(tmp_path / "app.db"))
+    await init_db(conn)
+    session = await SessionRepository(conn).create()
+    session_id = session.session_id
+    run_id = uuid4()
+    display_name = "江西农业大学是个什么学校"
+    # production flow: run_service names the session dir as <slug>-8hex before submit
+    paths.ensure_run_layout(session_id, run_id, display_name=display_name)
+    store = EvidenceStore(
+        run_id=run_id,
+        session_id=session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=paths,
+    )
+    artifacts = ArtifactRepository(conn)
+    web_id = await store.allocate_web_id()
+    await store.add(
+        EvidenceRecord(
+            id=web_id,
+            run_id=run_id,
+            source_type="web",
+            evidence_level="first_party",
+            title="t",
+            locator="https://example.com",
+            canonical_url="https://example.com",
+            excerpt="excerpt",
+        )
+    )
+    result = await submit_research_report_impl(
+        store=store,
+        artifacts=artifacts,
+        paths=paths,
+        session_id=session_id,
+        run_id=run_id,
+        report_data=_report(claims=[_claim("C1", [web_id], "medium")]),
+    )
+    assert result["degraded"] is False
+    artifact = await artifacts.get(UUID(result["artifact_id"]))
+    stored = Path(artifact.original_storage_path)
+    slug_dir = paths.session_dir(session_id)
+    assert slug_dir in stored.parents
+    legacy_report_dir = paths.sessions_root / str(session_id) / "runs" / str(run_id) / "reports"
+    assert not legacy_report_dir.exists()
+    await conn.close()
