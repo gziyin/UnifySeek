@@ -179,6 +179,25 @@ class _SequenceStubAgent:
         return _gen()
 
 
+class _InterruptMidStreamStubAgent:
+    def __init__(self, runs, run_id):
+        self._runs = runs
+        self._run_id = run_id
+
+    def astream_events(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        async def _gen():
+            await self._runs.update_status(
+                self._run_id,
+                RunStatus.INTERRUPTED,
+                finished=True,
+                error_code="SERVER_RESTART",
+                error_message="Run interrupted by server restart",
+            )
+            raise RuntimeError("failure after run was interrupted")
+
+        return _gen()
+
+
 class _FakeKnowledgeIndex:
     is_ready = True
 
@@ -271,6 +290,23 @@ async def test_executor_missing_submit_retries_once_then_succeeds(env, tmp_path)
     assert str(updated.report_artifact_id) == ARTIFACT_ID
     assert stub._calls == 2
     assert ":retry" in str(stub._configs[1].get("configurable", {}).get("thread_id"))
+
+
+@pytest.mark.asyncio
+async def test_executor_preserves_interrupted_when_failure_occurs_mid_run(env):
+    """run 中途被接管标为 interrupted 后失败：保留 interrupted，不再抛 invalid transition。"""
+    settings, conn, session, run, publisher, executor = env
+    runs_repo = RunRepository(conn)
+    stub = _InterruptMidStreamStubAgent(runs_repo, run.run_id)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await runs_repo.get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.INTERRUPTED
+    assert updated.error_code == "SERVER_RESTART"
+    assert "run.failed" not in await _event_types(conn, run.run_id)
 
 
 @pytest.mark.asyncio

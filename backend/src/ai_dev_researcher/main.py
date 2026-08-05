@@ -12,6 +12,7 @@ from ai_dev_researcher.api import artifacts, runs, sessions, uploads, websocket
 from ai_dev_researcher.api.dependencies import AppState
 from ai_dev_researcher.core.config import Settings, get_settings
 from ai_dev_researcher.core.errors import AppError
+from ai_dev_researcher.core.instance_lock import InstanceLock
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.repositories.events import EventRepository
 from ai_dev_researcher.repositories.evidence import EvidenceRepository
@@ -92,111 +93,112 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings.workspace_root.mkdir(parents=True, exist_ok=True)
-        settings.sessions_root.mkdir(parents=True, exist_ok=True)
-        conn = await connect(str(settings.db_path))
-        await init_db(conn)
+        with InstanceLock(settings.workspace_root / "instance.lock"):
+            settings.sessions_root.mkdir(parents=True, exist_ok=True)
+            conn = await connect(str(settings.db_path))
+            await init_db(conn)
 
-        paths = WorkspacePaths(settings.sessions_root, knowledge_base_root=settings.knowledge_base_root)
-        sessions_repo = SessionRepository(conn)
-        runs_repo = RunRepository(conn)
-        artifacts_repo = ArtifactRepository(conn)
-        events_repo = EventRepository(conn)
-        evidence_repo = EvidenceRepository(conn)
-        publisher = EventPublisher(events_repo, queue_size=settings.ws_send_queue_size)
+            paths = WorkspacePaths(settings.sessions_root, knowledge_base_root=settings.knowledge_base_root)
+            sessions_repo = SessionRepository(conn)
+            runs_repo = RunRepository(conn)
+            artifacts_repo = ArtifactRepository(conn)
+            events_repo = EventRepository(conn)
+            evidence_repo = EvidenceRepository(conn)
+            publisher = EventPublisher(events_repo, queue_size=settings.ws_send_queue_size)
 
-        interrupted = await runs_repo.mark_stale_interrupted()
-        if interrupted:
-            # No publisher fanout needed for historical interrupted runs on boot.
-            pass
+            interrupted = await runs_repo.mark_stale_interrupted()
+            if interrupted:
+                # No publisher fanout needed for historical interrupted runs on boot.
+                pass
 
-        provider = None
-        try:
-            from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
+            provider = None
+            try:
+                from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
 
-            provider = SentenceTransformersProvider(
-                model_name=settings.embedding_model,
-                hf_hub_cache=settings.hf_hub_cache,
-                embedding_offline=settings.embedding_offline,
-            )
-        except Exception as exc:  # noqa: BLE001 - embedding 可选，失败不影响启动
-            logger.warning("embedding provider unavailable: %s", exc)
+                provider = SentenceTransformersProvider(
+                    model_name=settings.embedding_model,
+                    hf_hub_cache=settings.hf_hub_cache,
+                    embedding_offline=settings.embedding_offline,
+                )
+            except Exception as exc:  # noqa: BLE001 - embedding 可选，失败不影响启动
+                logger.warning("embedding provider unavailable: %s", exc)
 
-        vector_store = _try_build_vector_store(settings, provider)
-        knowledge_index = _try_build_knowledge_index(settings, provider)
+            vector_store = _try_build_vector_store(settings, provider)
+            knowledge_index = _try_build_knowledge_index(settings, provider)
 
-        # 索引后台异步构建，不阻塞 API 启动；失败仅置为未就绪（工具返回 indexing 提示）。
-        kb_build_task: asyncio.Task | None = None
-        if knowledge_index is not None:
+            # 索引后台异步构建，不阻塞 API 启动；失败仅置为未就绪（工具返回 indexing 提示）。
+            kb_build_task: asyncio.Task | None = None
+            if knowledge_index is not None:
 
-            async def _build_kb_background() -> None:
-                try:
-                    await asyncio.to_thread(knowledge_index.rebuild)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("knowledge index background build failed: %s", exc)
+                async def _build_kb_background() -> None:
+                    try:
+                        await asyncio.to_thread(knowledge_index.rebuild)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("knowledge index background build failed: %s", exc)
 
-            kb_build_task = asyncio.create_task(_build_kb_background())
+                kb_build_task = asyncio.create_task(_build_kb_background())
 
-        def executor_factory():
-            if settings.fake_agent_mode or not settings.deepseek_api_key:
-                return FakeResearchExecutor(
+            def executor_factory():
+                if settings.fake_agent_mode or not settings.deepseek_api_key:
+                    return FakeResearchExecutor(
+                        runs=runs_repo,
+                        artifacts=artifacts_repo,
+                        evidence=evidence_repo,
+                        publisher=publisher,
+                        paths=paths,
+                    )
+                return AgentResearchExecutor(
+                    settings=settings,
                     runs=runs_repo,
                     artifacts=artifacts_repo,
                     evidence=evidence_repo,
                     publisher=publisher,
                     paths=paths,
+                    vector_store=vector_store,
+                    knowledge_index=knowledge_index,
                 )
-            return AgentResearchExecutor(
+
+            task_manager = TaskManager(executor_factory)
+            container = AppState(
                 settings=settings,
+                conn=conn,
+                paths=paths,
+                sessions=sessions_repo,
                 runs=runs_repo,
                 artifacts=artifacts_repo,
+                events=events_repo,
                 evidence=evidence_repo,
                 publisher=publisher,
-                paths=paths,
+                session_service=SessionService(sessions_repo, paths),
+                upload_service=UploadService(
+                    sessions=sessions_repo,
+                    artifacts=artifacts_repo,
+                    paths=paths,
+                    settings=settings,
+                    vector_store=vector_store,
+                ),
+                run_service=RunService(
+                    sessions=sessions_repo,
+                    runs=runs_repo,
+                    artifacts=artifacts_repo,
+                    paths=paths,
+                    publisher=publisher,
+                    task_manager=task_manager,
+                ),
+                task_manager=task_manager,
                 vector_store=vector_store,
                 knowledge_index=knowledge_index,
             )
-
-        task_manager = TaskManager(executor_factory)
-        container = AppState(
-            settings=settings,
-            conn=conn,
-            paths=paths,
-            sessions=sessions_repo,
-            runs=runs_repo,
-            artifacts=artifacts_repo,
-            events=events_repo,
-            evidence=evidence_repo,
-            publisher=publisher,
-            session_service=SessionService(sessions_repo, paths),
-            upload_service=UploadService(
-                sessions=sessions_repo,
-                artifacts=artifacts_repo,
-                paths=paths,
-                settings=settings,
-                vector_store=vector_store,
-            ),
-            run_service=RunService(
-                sessions=sessions_repo,
-                runs=runs_repo,
-                artifacts=artifacts_repo,
-                paths=paths,
-                publisher=publisher,
-                task_manager=task_manager,
-            ),
-            task_manager=task_manager,
-            vector_store=vector_store,
-            knowledge_index=knowledge_index,
-        )
-        app.state.container = container
-        try:
-            yield
-        finally:
-            if kb_build_task is not None:
-                kb_build_task.cancel()
-            await task_manager.shutdown()
-            await conn.close()
+            app.state.container = container
+            try:
+                yield
+            finally:
+                if kb_build_task is not None:
+                    kb_build_task.cancel()
+                await task_manager.shutdown()
+                await conn.close()
 
     app = FastAPI(
         title="AI Dev Researcher",

@@ -30,6 +30,10 @@ backend/app.db
 backend/sessions/
 backend/vector_store/
 
+# Single-instance lock files
+backend/*.lock
+backend/workspace/*.lock
+
 # 本地知识库（框架源码调研素材，整目录不入库）
 knowledge_base/
 

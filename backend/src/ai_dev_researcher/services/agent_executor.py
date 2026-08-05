@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import time
 from dataclasses import dataclass
 from uuid import UUID
@@ -11,7 +12,7 @@ from ai_dev_researcher.agents.model import create_model_binding
 from ai_dev_researcher.agents.orchestrator import create_research_agent
 from ai_dev_researcher.agents.stream_adapter import map_framework_event
 from ai_dev_researcher.core.config import Settings
-from ai_dev_researcher.domain.runs import Run, RunStatus
+from ai_dev_researcher.domain.runs import ALLOWED_TRANSITIONS, Run, RunStatus
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.repositories.evidence import EvidenceRepository
 from ai_dev_researcher.repositories.runs import RunRepository
@@ -23,6 +24,8 @@ from ai_dev_researcher.tools.knowledge_base import (
     search_knowledge_base_impl,
 )
 from ai_dev_researcher.tools.report_submitter import submit_research_report_impl
+
+logger = logging.getLogger(__name__)
 
 
 class _BudgetExceededError(RuntimeError):
@@ -207,7 +210,7 @@ class AgentResearchExecutor:
             )
         except asyncio.CancelledError:
             current = await self._runs.get(run_id)
-            if current and current.status not in {RunStatus.CANCELLED, RunStatus.SUCCEEDED}:
+            if current and RunStatus.CANCELLED in ALLOWED_TRANSITIONS.get(current.status, set()):
                 await self._runs.update_status(
                     run_id,
                     RunStatus.CANCELLED,
@@ -221,50 +224,79 @@ class AgentResearchExecutor:
                     event_type="run.cancelled",
                     payload={"reason": "user_cancelled"},
                 )
+            elif current:
+                logger.warning(
+                    "preserving run %s status %s instead of transitioning to %s",
+                    run_id,
+                    current.status,
+                    RunStatus.CANCELLED,
+                )
             raise
         except _BudgetExceededError as exc:
-            report_id = UUID(report_artifact_id) if report_artifact_id else None
-            await self._runs.update_status(
+            await self._fail_run_if_allowed(
                 run_id,
-                RunStatus.FAILED,
-                finished=True,
                 error_code="BUDGET_EXCEEDED",
                 error_message=str(exc)[:500],
-                report_artifact_id=report_id,
-            )
-            await self._publisher.publish(
-                session_id=run.session_id,
-                run_id=run_id,
-                event_type="run.failed",
-                payload={
-                    "code": "BUDGET_EXCEEDED",
-                    "message": "Research run budget exceeded",
-                    "reason": str(exc),
-                    "retryable": False,
-                    "report_artifact_id": str(report_id) if report_id else None,
-                },
+                event_code="BUDGET_EXCEEDED",
+                event_message="Research run budget exceeded",
+                reason=str(exc),
+                report_artifact_id=report_artifact_id,
             )
         except Exception as exc:  # noqa: BLE001
-            report_id = UUID(report_artifact_id) if report_artifact_id else None
-            await self._runs.update_status(
+            await self._fail_run_if_allowed(
                 run_id,
-                RunStatus.FAILED,
-                finished=True,
                 error_code="RUN_FAILED",
                 error_message=str(exc)[:500],
-                report_artifact_id=report_id,
+                event_code="RUN_FAILED",
+                event_message="Research run failed",
+                reason=str(exc),
+                report_artifact_id=report_artifact_id,
             )
-            await self._publisher.publish(
-                session_id=run.session_id,
-                run_id=run_id,
-                event_type="run.failed",
-                payload={
-                    "code": "RUN_FAILED",
-                    "message": "Research run failed",
-                    "retryable": False,
-                    "report_artifact_id": str(report_id) if report_id else None,
-                },
+
+    async def _fail_run_if_allowed(
+        self,
+        run_id: UUID,
+        *,
+        error_code: str,
+        error_message: str,
+        event_code: str,
+        event_message: str,
+        reason: str,
+        report_artifact_id: str | None = None,
+    ) -> bool:
+        current = await self._runs.get(run_id)
+        if current is None:
+            return False
+        if RunStatus.FAILED not in ALLOWED_TRANSITIONS.get(current.status, set()):
+            logger.warning(
+                "preserving run %s status %s instead of transitioning to %s",
+                run_id,
+                current.status,
+                RunStatus.FAILED,
             )
+            return False
+        report_id = UUID(report_artifact_id) if report_artifact_id else None
+        await self._runs.update_status(
+            run_id,
+            RunStatus.FAILED,
+            finished=True,
+            error_code=error_code,
+            error_message=error_message,
+            report_artifact_id=report_id,
+        )
+        await self._publisher.publish(
+            session_id=current.session_id,
+            run_id=run_id,
+            event_type="run.failed",
+            payload={
+                "code": event_code,
+                "message": event_message,
+                "reason": reason,
+                "retryable": False,
+                "report_artifact_id": str(report_id) if report_id else None,
+            },
+        )
+        return True
 
     async def _run_agent_attempt(
         self,
