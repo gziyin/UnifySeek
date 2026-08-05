@@ -42,3 +42,6 @@ Thumbs.db
 # Build
 *.log
 .turbo/
+
+# Docs
+docs/
