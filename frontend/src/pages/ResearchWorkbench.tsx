@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
+  ApiError,
   cancelRun,
   createRun,
   createSession,
   getArtifactContent,
   getRun,
+  getSession,
   listEvents,
   uploadFile,
 } from "../api/client";
@@ -38,8 +40,22 @@ export function ResearchWorkbench() {
       try {
         const existing = localStorage.getItem(SESSION_KEY);
         if (existing) {
-          if (!cancelled) {
-            setSessionId(existing);
+          try {
+            await getSession(existing);
+            if (!cancelled) {
+              setSessionId(existing);
+            }
+          } catch (err) {
+            if (err instanceof ApiError && err.code === "SESSION_NOT_FOUND") {
+              localStorage.removeItem(SESSION_KEY);
+              const session = await createSession();
+              localStorage.setItem(SESSION_KEY, session.session_id);
+              if (!cancelled) {
+                setSessionId(session.session_id);
+              }
+            } else {
+              throw err;
+            }
           }
           return;
         }

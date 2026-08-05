@@ -9,18 +9,33 @@ import {
   type Session,
 } from "../domain/schemas";
 
+export class ApiError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(`${code}: ${message}`);
+    this.name = "ApiError";
+    this.code = code;
+  }
+}
+
 async function parseJson<T>(response: Response, schema: { parse: (data: unknown) => T }): Promise<T> {
   const data = await response.json();
   if (!response.ok) {
     const message = typeof data?.message === "string" ? data.message : response.statusText;
     const code = typeof data?.code === "string" ? data.code : "HTTP_ERROR";
-    throw new Error(`${code}: ${message}`);
+    throw new ApiError(code, message);
   }
   return schema.parse(data);
 }
 
 export async function createSession(): Promise<Session> {
   const response = await fetch("/api/sessions", { method: "POST" });
+  return parseJson(response, SessionSchema);
+}
+
+export async function getSession(sessionId: string): Promise<Session> {
+  const response = await fetch(`/api/sessions/${sessionId}`);
   return parseJson(response, SessionSchema);
 }
 

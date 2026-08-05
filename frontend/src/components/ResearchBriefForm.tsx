@@ -11,8 +11,7 @@ export function ResearchBriefForm({ disabled, onSubmit, onCancel, canCancel }: P
   const [question, setQuestion] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const trimmedLength = question.trim().length;
-  const tooShort = trimmedLength > 0 && trimmedLength < 10;
+  const isEmpty = question.trim().length === 0;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -47,9 +46,8 @@ export function ResearchBriefForm({ disabled, onSubmit, onCancel, canCancel }: P
           disabled={disabled || submitting}
         />
       </label>
-      {tooShort ? <p className="muted">研究问题至少 10 个字符（当前 {trimmedLength}）。</p> : null}
       <div className="actions">
-        <button className="btn" type="submit" disabled={disabled || submitting}>
+        <button className="btn" type="submit" disabled={disabled || submitting || isEmpty}>
           {submitting ? "启动中…" : "启动研究"}
         </button>
         {canCancel ? (

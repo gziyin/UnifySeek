@@ -47,7 +47,7 @@ ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
 
 
 class ResearchRequest(BaseModel):
-    question: str = Field(min_length=10)
+    question: str = Field()
     constraints: list[str] = Field(default_factory=list, max_length=10)
     focus_areas: list[str] = Field(default_factory=list, max_length=10)
     max_web_sources: int = Field(default=8, ge=3, le=15)
@@ -57,8 +57,8 @@ class ResearchRequest(BaseModel):
     @classmethod
     def strip_question(cls, value: str) -> str:
         cleaned = value.strip()
-        if len(cleaned) < 10:
-            raise ValueError("question must be at least 10 characters")
+        if not cleaned:
+            raise ValueError("question must not be empty")
         return cleaned
 
 
