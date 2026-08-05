@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
   cancelRun,
   createRun,
@@ -26,6 +26,11 @@ export function ResearchWorkbench() {
   const [reportMarkdown, setReportMarkdown] = useState<string>("");
   const [bootError, setBootError] = useState<string | null>(null);
   const [view, dispatch] = useReducer(runEventReducer, initialRunViewState);
+  // lastSeq ??????? ref ???? WebSocket ??????????
+  const lastSeqRef = useRef<number>(0);
+  useEffect(() => {
+    lastSeqRef.current = view.lastSeq;
+  }, [view.lastSeq]);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,7 +81,7 @@ export function ResearchWorkbench() {
     function connect() {
       dispatch({ type: "connection", connection: retry === 0 ? "connecting" : "reconnecting" });
       const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-      const afterSeq = view.lastSeq;
+      const afterSeq = lastSeqRef.current;
       socket = new WebSocket(
         `${protocol}://${window.location.host}/ws/runs/${runId}?after_seq=${afterSeq}`,
       );
@@ -223,13 +228,13 @@ export function ResearchWorkbench() {
           <UploadPanel artifacts={artifacts} disabled={!sessionId || active} onUpload={handleUpload} />
         </div>
         <div style={{ display: "grid", gap: "1rem", alignContent: "start" }}>
-          <AgentTimeline state={view} />
           <ReportViewer
             markdown={reportMarkdown}
             artifactId={view.reportArtifactId ?? run?.report_artifact_id ?? undefined}
             degraded={view.reportDegraded}
             reason={view.reportReason}
           />
+          <AgentTimeline state={view} />
         </div>
         <div style={{ display: "grid", gap: "1rem", alignContent: "start" }}>
           <SourceLedger sources={view.sources} />
