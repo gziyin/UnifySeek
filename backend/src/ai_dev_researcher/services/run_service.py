@@ -129,5 +129,27 @@ class RunService:
             event_type="run.cancelling",
             payload={"requested_at": utc_now().isoformat()},
         )
-        await self._task_manager.cancel_run(run_id)
+        cancelled_requested = await self._task_manager.request_cancel(run_id)
+        if not cancelled_requested:
+            # No live task to cancel (missing or already completed): re-read the
+            # run so we never override a concurrent terminal success, then converge
+            # to cancelled so the run never stays stuck in CANCELLING.
+            current = await self._runs.get(run_id)
+            if current and current.status in TERMINAL_RUN_STATUSES:
+                return current
+            final = await self._runs.update_status(
+                run_id,
+                RunStatus.CANCELLED,
+                finished=True,
+                cancel_requested=True,
+                error_code="CANCELLED",
+                error_message="Cancelled (no active task)",
+            )
+            await self._publisher.publish(
+                session_id=run.session_id,
+                run_id=run_id,
+                event_type="run.cancelled",
+                payload={"reason": "cancelled_no_active_task"},
+            )
+            return final
         return updated

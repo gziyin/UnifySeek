@@ -71,8 +71,17 @@ export async function getRun(runId: string): Promise<Run> {
 }
 
 export async function cancelRun(runId: string): Promise<Run> {
-  const response = await fetch(`/api/runs/${runId}/cancel`, { method: "POST" });
-  return parseJson(response, RunSchema);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(`/api/runs/${runId}/cancel`, {
+      method: "POST",
+      signal: controller.signal,
+    });
+    return parseJson(response, RunSchema);
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 export async function listEvents(runId: string, afterSeq = 0): Promise<ResearchEvent[]> {

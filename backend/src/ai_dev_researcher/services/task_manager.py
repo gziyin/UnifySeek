@@ -25,16 +25,20 @@ class TaskManager:
             self._tasks[run_id] = task
             task.add_done_callback(lambda finished: self._on_done(run_id, finished))
 
-    async def cancel_run(self, run_id: UUID) -> None:
+    async def request_cancel(self, run_id: UUID) -> bool:
+        """Request cancellation without waiting for the task to finish.
+
+        Returns True if a live task was found and ``cancel()`` was requested;
+        False if there is no such task (missing or already completed). The
+        terminal transition to ``cancelled`` is converged by the executor's
+        CancelledError handling or by the caller (RunService).
+        """
         async with self._lock:
             task = self._tasks.get(run_id)
         if task is None or task.done():
-            return
+            return False
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        return True
 
     async def shutdown(self) -> None:
         async with self._lock:

@@ -206,8 +206,14 @@ export function ResearchWorkbench() {
     if (!run) {
       return;
     }
-    const updated = await cancelRun(run.run_id);
-    setRun(updated);
+    // 乐观置为 cancelling，按钮立即解锁，不等待接口响应。
+    setRun((prev) => (prev ? { ...prev, status: "cancelling" } : prev));
+    try {
+      const updated = await cancelRun(run.run_id);
+      setRun(updated);
+    } catch {
+      // 保留 cancelling，依赖轮询 / WebSocket 收敛终态。
+    }
   }, [run]);
 
   const active =
