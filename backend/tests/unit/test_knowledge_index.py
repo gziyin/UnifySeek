@@ -216,6 +216,105 @@ def test_incremental_rebuild_skips_unchanged_files(kb_root, provider, tmp_path):
     assert index.is_ready
 
 
+@needs_chroma
+def test_rebuild_excludes_tests_evals_and_data_json(kb_root, provider, tmp_path):
+    (kb_root / "tests").mkdir()
+    (kb_root / "tests" / "test_util.py").write_text(
+        '"""Test util."""\n\ndef test_x():\n    assert True\n', encoding="utf-8"
+    )
+    (kb_root / "evals").mkdir()
+    (kb_root / "evals" / "eval_util.py").write_text(
+        '"""Eval util."""\n\neval_result = "ok"\n', encoding="utf-8"
+    )
+    (kb_root / "data").mkdir()
+    (kb_root / "data" / "db.json").write_text(
+        '{"table": "seed-data"}\n', encoding="utf-8"
+    )
+
+    index = _make_index(kb_root, provider, tmp_path)
+    index.rebuild()
+
+    assert not any(
+        c.file_path == "tests/test_util.py" for c in index.retrieve("test_x", top_k=50)
+    )
+    assert not any(
+        c.file_path == "evals/eval_util.py" for c in index.retrieve("eval_result", top_k=50)
+    )
+    assert not any(
+        c.file_path == "data/db.json" for c in index.retrieve("seed-data", top_k=50)
+    )
+
+
+@needs_chroma
+def test_file_chunk_cap_truncates(provider, tmp_path, monkeypatch):
+    from ai_dev_researcher.storage import knowledge_index as ki
+    from ai_dev_researcher.storage.code_chunker import ChunkInfo
+
+    fake_chunks = [
+        ChunkInfo(f"chunk {i}", f"sym{i}", "text", "", i, i + 1) for i in range(6000)
+    ]
+    monkeypatch.setattr(ki, "chunk_file", lambda source, name, max_tokens: fake_chunks)
+    monkeypatch.setattr(ki, "generate_summary", lambda *a, **k: "summary")
+
+    root = tmp_path / "kb_cap"
+    root.mkdir()
+    f = root / "big.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+
+    index = KnowledgeIndex(
+        kb_root=root, persist_dir=tmp_path / "vs", embedding_provider=provider
+    )
+    items = index._index_file(f)
+    assert len(items) == ki._MAX_FILE_CHUNKS
+    assert len(items) <= 5000
+
+
+@needs_chroma
+def test_rebuild_adds_in_batches(provider, tmp_path, monkeypatch):
+    from ai_dev_researcher.storage import knowledge_index as ki
+    from ai_dev_researcher.storage.code_chunker import ChunkInfo
+
+    class FakeCollection:
+        def __init__(self):
+            self.add_calls: list[list[str]] = []
+            self.deleted_where: list[dict] = []
+
+        def get(self, **kwargs):
+            return {"metadatas": []}
+
+        def delete(self, *, where=None, ids=None):
+            del ids
+            if where is not None:
+                self.deleted_where.append(where)
+
+        def add(self, *, ids, documents, embeddings, metadatas):
+            assert len(ids) <= ki._ADD_BATCH_SIZE
+            self.add_calls.append(ids)
+
+    fake_chunks = [
+        ChunkInfo(f"chunk {i}", f"sym{i}", "text", "", i, i + 1) for i in range(2500)
+    ]
+    monkeypatch.setattr(ki, "chunk_file", lambda source, name, max_tokens: fake_chunks)
+    monkeypatch.setattr(ki, "generate_summary", lambda *a, **k: "summary")
+
+    root = tmp_path / "kb_batch"
+    root.mkdir()
+    (root / "big.py").write_text("x = 1\n", encoding="utf-8")
+
+    index = KnowledgeIndex(
+        kb_root=root, persist_dir=tmp_path / "vs", embedding_provider=provider
+    )
+    fake = FakeCollection()
+    index._collection = fake  # type: ignore[assignment]
+    index._client = object()
+
+    count = index.rebuild()
+    assert count == 2500
+    assert len(fake.add_calls) == 3
+    assert all(len(call) <= 1000 for call in fake.add_calls)
+    assert fake.deleted_where == [{"file_path": "big.py"}]
+
+
 # ---------------------------------------------------------------------------
 # search_knowledge_base_impl
 # ---------------------------------------------------------------------------
