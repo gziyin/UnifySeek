@@ -240,6 +240,28 @@ textarea {
   white-space: pre-wrap;
 }
 
+.timeline-failure {
+  margin: 0.35rem 0.4rem 0.15rem;
+  padding: 0.5rem 0.6rem;
+  background: #f5d6d6;
+  border-left: 3px solid var(--danger);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.timeline-failure-label {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.timeline-failure-text {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .timeline-item.actor-orchestrator .timeline-head .timeline-label {
   color: var(--accent);
 }

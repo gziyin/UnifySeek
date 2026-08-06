@@ -28,6 +28,26 @@ from ai_dev_researcher.tools.report_submitter import submit_research_report_impl
 logger = logging.getLogger(__name__)
 
 
+def _message_text(value) -> str:
+    """Extract text from an on_chat_model_end output (AIMessage or raw dict)."""
+    content = getattr(value, "content", None)
+    if content is None and isinstance(value, dict):
+        content = value.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return str(value) if value is not None else ""
+
+
 class _BudgetExceededError(RuntimeError):
     """Marker so the executor can attribute a run failure to budget controls."""
 
@@ -37,6 +57,7 @@ class _StreamAttemptResult:
     report_artifact_id: str | None = None
     budget_reason: str | None = None
     degraded_reason: str | None = None
+    last_message: str | None = None
 
 
 class AgentResearchExecutor:
@@ -120,81 +141,105 @@ class AgentResearchExecutor:
             }
             config = {"configurable": {"thread_id": str(run_id)}}
 
-            result = await self._run_agent_attempt(
-                run=run,
-                context=context,
-                store=store,
-                agent=agent,
-                input_payload=input_payload,
-                config=config,
-            )
+            attempts = [
+                {
+                    "input": input_payload,
+                    "config": config,
+                },
+                {
+                    "input": {
+                        "messages": [
+                            {"role": "user", "content": run.request.question},
+                            {
+                                "role": "user",
+                                "content": (
+                                    "上一轮已结束但未提交研究报告。请不要继续广泛调研，"
+                                    "仅基于当前证据账本立即调用 submit_research_report 提交报告；"
+                                    "若证据不足，也请提交一份尽量完整但标注低置信度的报告。"
+                                ),
+                            },
+                        ]
+                    },
+                    "config": {"configurable": {"thread_id": f"{run_id}:retry"}},
+                },
+                None,
+            ]
 
-            if result.report_artifact_id and result.degraded_reason:
-                report_artifact_id = result.report_artifact_id
-                raise RuntimeError(
-                    f"submit_research_report returned degraded report: {result.degraded_reason}"
-                )
-            if result.report_artifact_id:
-                report_artifact_id = result.report_artifact_id
-            elif result.budget_reason:
-                report_artifact_id = await self._write_degraded_report(
-                    context, store, result.budget_reason
-                )
-                await self._publish_report_ready(
-                    run,
-                    report_artifact_id,
-                    degraded=True,
-                    reason=result.budget_reason,
-                )
-                raise _BudgetExceededError(result.budget_reason)
-            else:
-                # 流结束但未提交：保留已有 evidence，换一个 thread 做一次受控重试。
-                retry_input = {
-                    "messages": [
-                        {"role": "user", "content": run.request.question},
-                        {
-                            "role": "user",
-                            "content": (
-                                "上一轮已结束但未提交研究报告。请不要继续广泛调研，"
-                                "仅基于当前证据账本立即调用 submit_research_report 提交报告；"
-                                "若证据不足，也请提交一份尽量完整但标注低置信度的报告。"
-                            ),
+            last_message: str | None = None
+            for attempt_index, attempt in enumerate(attempts, start=1):
+                if attempt_index == 3:
+                    ledger_summary = await self._evidence_ledger_summary(store)
+                    attempt = {
+                        "input": {
+                            "messages": [
+                                {"role": "user", "content": run.request.question},
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "前两轮均已结束但未提交研究报告。下面是当前证据账本中"
+                                        "可直接引用的证据（只读摘要，最多 20 条）：\n"
+                                        f"{ledger_summary}\n\n"
+                                        "硬性要求：禁止再调用搜索/提取类工具；禁止输出纯文本报告；"
+                                        "必须立即调用 submit_research_report 提交报告；"
+                                        "每条 claim 只能引用上面列出的真实证据 ID；"
+                                        "若证据不足，请使用 medium/low 置信度并写入 unknowns，"
+                                        "但仍必须调用 submit_research_report。"
+                                    ),
+                                },
+                            ]
                         },
-                    ]
-                }
-                retry_config = {
-                    "configurable": {"thread_id": f"{run_id}:retry"}
-                }
-                retry_result = await self._run_agent_attempt(
+                        "config": {"configurable": {"thread_id": f"{run_id}:retry2"}},
+                    }
+                attempt_result = await self._run_agent_attempt(
                     run=run,
                     context=context,
                     store=store,
                     agent=agent,
-                    input_payload=retry_input,
-                    config=retry_config,
+                    input_payload=attempt["input"],
+                    config=attempt["config"],
+                    attempt_index=attempt_index,
                 )
-                if retry_result.report_artifact_id and retry_result.degraded_reason:
-                    report_artifact_id = retry_result.report_artifact_id
+                if attempt_result.last_message:
+                    last_message = attempt_result.last_message
+
+                if attempt_result.report_artifact_id and attempt_result.degraded_reason:
+                    report_artifact_id = attempt_result.report_artifact_id
                     raise RuntimeError(
-                        f"submit_research_report returned degraded report: {retry_result.degraded_reason}"
+                        f"submit_research_report returned degraded report: {attempt_result.degraded_reason}"
                     )
-                if retry_result.report_artifact_id:
-                    report_artifact_id = retry_result.report_artifact_id
-                elif retry_result.budget_reason:
+                if attempt_result.report_artifact_id:
+                    report_artifact_id = attempt_result.report_artifact_id
+                    break
+                if attempt_result.budget_reason:
                     report_artifact_id = await self._write_degraded_report(
-                        context, store, retry_result.budget_reason
+                        context, store, attempt_result.budget_reason
                     )
                     await self._publish_report_ready(
                         run,
                         report_artifact_id,
                         degraded=True,
-                        reason=retry_result.budget_reason,
+                        reason=attempt_result.budget_reason,
                     )
-                    raise _BudgetExceededError(retry_result.budget_reason)
-                else:
-                    raise RuntimeError(
-                        "agent finished without submit_research_report after one controlled retry"
-                    )
+                    raise _BudgetExceededError(attempt_result.budget_reason)
+            else:
+                reason = (
+                    "agent finished without submit_research_report after two controlled retries"
+                )
+                if last_message:
+                    reason += f"; last assistant message: {last_message[:500]}"
+                report_artifact_id = await self._write_degraded_report(
+                    context,
+                    store,
+                    reason,
+                    last_message=last_message,
+                )
+                await self._publish_report_ready(
+                    run,
+                    report_artifact_id,
+                    degraded=True,
+                    reason=reason,
+                )
+                raise RuntimeError(reason)
 
             await self._runs.update_status(
                 run_id,
@@ -307,8 +352,10 @@ class AgentResearchExecutor:
         agent,
         input_payload: dict,
         config: dict,
+        attempt_index: int = 1,
     ) -> _StreamAttemptResult:
         report_artifact_id: str | None = None
+        last_message = ""
         # 维护 tool_call_id -> input_summary，用于在 tool.completed 上附带脱敏输入摘要。
         tool_inputs: dict[str, str] = {}
         started = time.monotonic()
@@ -323,6 +370,11 @@ class AgentResearchExecutor:
         async for raw in stream:
             if not isinstance(raw, dict):
                 continue
+            if raw.get("event") == "on_chat_model_end":
+                output = (raw.get("data") or {}).get("output")
+                content = _message_text(output)
+                if content.strip():
+                    last_message = content
             event_type, actor, payload = map_framework_event(raw)
             if event_type is None:
                 continue
@@ -470,7 +522,19 @@ class AgentResearchExecutor:
                     budget_reason=budget_reason,
                 )
 
-        return _StreamAttemptResult(report_artifact_id=report_artifact_id)
+        if not report_artifact_id:
+            logger.warning(
+                "attempt %s finished without submit_research_report: "
+                "tool_calls=%s elapsed=%.1fs last_message=%s",
+                attempt_index,
+                tool_call_count,
+                time.monotonic() - started,
+                (last_message or "")[:1000],
+            )
+        return _StreamAttemptResult(
+            report_artifact_id=report_artifact_id,
+            last_message=last_message or None,
+        )
 
     async def _prefetch_knowledge(self, context: RunContext, store: EvidenceStore) -> None:
         """Deterministically inject KB context + K evidence before model delegation."""
@@ -566,11 +630,31 @@ class AgentResearchExecutor:
             payload=ready_payload,
         )
 
+    async def _evidence_ledger_summary(
+        self,
+        store: EvidenceStore,
+        *,
+        limit: int = 20,
+        excerpt_limit: int = 240,
+    ) -> str:
+        records = await store.list_for_run()
+        lines: list[str] = []
+        for record in records[:limit]:
+            excerpt = store.excerpt(record, limit=excerpt_limit)
+            lines.append(
+                f"- {record.id} | {record.source_type} | {record.evidence_level} | "
+                f"{record.title} | {record.locator} | {excerpt}"
+            )
+        if not lines:
+            return "- 当前证据账本为空"
+        return "\n".join(lines)
+
     async def _write_degraded_report(
         self,
         context: RunContext,
         store: EvidenceStore,
         reason: str,
+        last_message: str | None = None,
     ) -> str:
         report_data = {
             "title": f"[DEGRADED] {reason}",
@@ -581,6 +665,8 @@ class AgentResearchExecutor:
             "unknowns": [reason],
             "reason": reason,
         }
+        if last_message:
+            report_data["model_final_message"] = last_message
         result = await submit_research_report_impl(
             store=store,
             artifacts=self._artifacts,

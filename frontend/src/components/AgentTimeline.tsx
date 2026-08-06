@@ -79,6 +79,12 @@ function Details({ event }: { event: ResearchEvent }) {
   if (payload.message != null) {
     rows.push(["信息", String(payload.message)]);
   }
+  if (payload.reason != null) {
+    rows.push(["失败原因", String(payload.reason)]);
+  }
+  if (payload.code != null) {
+    rows.push(["错误码", String(payload.code)]);
+  }
   if (payload.agent_name != null) {
     rows.push(["智能体", String(payload.agent_name)]);
   }
@@ -101,6 +107,10 @@ function Details({ event }: { event: ResearchEvent }) {
 
 function TimelineItem({ event }: { event: ResearchEvent }) {
   const [open, setOpen] = useState(false);
+  const failureReason =
+    event.type === "run.failed"
+      ? String(event.payload.reason ?? event.payload.message ?? "")
+      : "";
   const canExpand =
     event.type === "tool.started" ||
     event.type === "tool.completed" ||
@@ -108,7 +118,8 @@ function TimelineItem({ event }: { event: ResearchEvent }) {
     event.type === "evidence.recorded" ||
     event.type === "agent.started" ||
     event.type === "agent.completed" ||
-    event.type === "report.ready";
+    event.type === "report.ready" ||
+    event.type === "run.failed";
   return (
     <div className={`timeline-item ${actorClass(event.actor)}`}>
       <button
@@ -122,6 +133,12 @@ function TimelineItem({ event }: { event: ResearchEvent }) {
         <span className="timeline-actor">{event.actor}</span>
         {canExpand ? <span className="timeline-chevron">{open ? "▾" : "▸"}</span> : null}
       </button>
+      {failureReason ? (
+        <div className="timeline-failure" role="alert">
+          <span className="timeline-failure-label">失败原因</span>
+          <span className="timeline-failure-text">{failureReason}</span>
+        </div>
+      ) : null}
       {open ? <Details event={event} /> : null}
     </div>
   );

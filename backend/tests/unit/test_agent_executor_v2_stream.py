@@ -31,6 +31,14 @@ def _tool_end(name: str, run_id: str, output) -> dict:
     return {"event": "on_tool_end", "name": name, "run_id": run_id, "data": {"output": output}}
 
 
+def _model_end(content: str) -> dict:
+    return {
+        "event": "on_chat_model_end",
+        "name": "ChatDeepSeek",
+        "data": {"output": {"content": content}},
+    }
+
+
 ARTIFACT_ID = "851a4589-edee-470e-9732-0ee5548fa5b7"
 
 
@@ -144,7 +152,7 @@ async def test_executor_v2_stream_degraded_path(env):
 
 @pytest.mark.asyncio
 async def test_executor_v2_stream_no_submit_fails(env):
-    """流结束但没有 submit_research_report：run 应 FAILED。"""
+    """三次流结束都没有 submit_research_report：run 应 FAILED 且生成降级报告。"""
     settings, conn, session, run, publisher, executor = env
     events = [
         _tool_start("search_web", "r1", {"query": "DeepAgents"}),
@@ -159,6 +167,12 @@ async def test_executor_v2_stream_no_submit_fails(env):
     assert updated is not None
     assert updated.status == RunStatus.FAILED
     assert "without submit_research_report" in updated.error_message
+    assert "after two controlled retries" in updated.error_message
+    assert updated.report_artifact_id is not None
+
+    types = await _event_types(conn, run.run_id)
+    assert "report.ready" in types
+    assert "run.failed" in types
 
 
 class _SequenceStubAgent:
@@ -290,6 +304,85 @@ async def test_executor_missing_submit_retries_once_then_succeeds(env, tmp_path)
     assert str(updated.report_artifact_id) == ARTIFACT_ID
     assert stub._calls == 2
     assert ":retry" in str(stub._configs[1].get("configurable", {}).get("thread_id"))
+
+
+@pytest.mark.asyncio
+async def test_executor_missing_submit_thrice_writes_degraded_report_with_last_message(env):
+    """三次 attempt 均未提交：run FAILED + 降级报告，失败原因与报告含最后模型消息。"""
+    settings, conn, session, run, publisher, executor = env
+    batches = [
+        [_model_end("第一轮：我先继续搜索证据。")],
+        [_model_end("第二轮：证据已够，以下是结论……")],
+        [_model_end("第三轮：最终回答文本（未调用提交工具）。")],
+    ]
+    stub = _SequenceStubAgent(batches)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert "after two controlled retries" in updated.error_message
+    assert "last assistant message" in updated.error_message
+    assert updated.report_artifact_id is not None
+
+    types = await _event_types(conn, run.run_id)
+    assert "report.ready" in types
+    assert "run.failed" in types
+
+    artifact = await ArtifactRepository(conn).get(updated.report_artifact_id)
+    assert artifact is not None
+    content = Path(artifact.original_storage_path).read_text(encoding="utf-8")
+    assert "第三轮：最终回答文本（未调用提交工具）。" in content
+
+
+@pytest.mark.asyncio
+async def test_executor_missing_submit_thrice_then_succeeds_on_third(env):
+    """第三次 attempt 成功提交：run SUCCEEDED 且使用 :retry2 thread。"""
+    settings, conn, session, run, publisher, executor = env
+    batches = [
+        [_model_end("第一轮文本")],
+        [_model_end("第二轮文本")],
+        [
+            _tool_start("submit_research_report", "r3", {"title": "final"}),
+            _tool_end("submit_research_report", "r3", {"artifact_id": ARTIFACT_ID, "title": "final"}),
+        ],
+    ]
+    stub = _SequenceStubAgent(batches)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    assert str(updated.report_artifact_id) == ARTIFACT_ID
+    assert stub._calls == 3
+    assert ":retry2" in str(stub._configs[2].get("configurable", {}).get("thread_id"))
+
+
+@pytest.mark.asyncio
+async def test_executor_budget_on_second_attempt_stops_before_third(env):
+    """第二次 attempt 预算超限：立即 BUDGET_EXCEEDED，不再发起第三次 attempt。"""
+    settings, conn, session, run, publisher, executor = env
+    executor._settings.agent_max_tool_calls = 1
+    executor._settings.agent_max_elapsed_seconds = 0
+    batches = [
+        [_model_end("第一轮文本")],
+        [_tool_start("search_web", "r2", {"query": "budget"})],
+    ]
+    stub = _SequenceStubAgent(batches)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "BUDGET_EXCEEDED"
+    assert updated.report_artifact_id is not None
+    assert stub._calls == 2
 
 
 @pytest.mark.asyncio
