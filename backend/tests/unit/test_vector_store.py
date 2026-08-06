@@ -113,6 +113,43 @@ def test_reindex_same_artifact_replaces(tmp_path: Path):
     assert results
     assert all(c.artifact_id == "a" for c in results)
 
+
+def test_vector_store_adds_in_batches(tmp_path):
+    from ai_dev_researcher.storage import vector_store as vs
+
+    class FakeCollection:
+        def __init__(self):
+            self.add_calls: list[list[str]] = []
+            self.deleted_where: list[dict] = []
+            self.deleted_ids: list[str] = []
+
+        def add(self, *, ids, documents, embeddings, metadatas):
+            assert len(ids) <= vs._ADD_BATCH_SIZE
+            self.add_calls.append(ids)
+
+        def delete(self, *, where=None, ids=None):
+            if where is not None:
+                self.deleted_where.append(where)
+            if ids:
+                self.deleted_ids.extend(ids)
+
+    store = VectorStore(
+        persist_dir=tmp_path / "chroma",
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    fake = FakeCollection()
+    store._collection = fake  # type: ignore[assignment]
+    store._client = object()
+
+    # 600 paragraphs x ~2 chunks each -> > 1000 chunks, crossing a batch boundary.
+    text = "\n\n".join("para " + "y" * 3000 for _ in range(600))
+    count = store.index_document(artifact_id="big", text=text)
+    assert count > vs._ADD_BATCH_SIZE
+    assert len(fake.add_calls) >= 2
+    assert all(len(call) <= vs._ADD_BATCH_SIZE for call in fake.add_calls)
+    assert fake.deleted_where == [{"artifact_id": "big"}]
+
+
 # --- Issue #8: offline embedding cache control --------------------------------
 
 def test_model_cache_dir_names_bare_and_org():

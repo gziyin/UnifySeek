@@ -47,7 +47,26 @@ except ImportError:  # pragma: no cover - 依赖未安装时的降级路径
 
 KB_COLLECTION_NAME = "ai_dev_researcher_kb"
 SKIP_DIRS = {".venv", "node_modules", ".git", "__pycache__", "dist", ".pytest_cache"}
+
+
 _METADATA_BATCH = 5000
+_ADD_BATCH_SIZE = 1000
+_MAX_FILE_CHUNKS = 5000
+
+
+def _is_excluded_path(rel: str) -> bool:
+    """Return True when a knowledge-base-relative path should be excluded.
+
+    Exclusion rules (path semantics):
+    - path contains a ``tests/`` or ``evals/`` directory segment;
+    - file matches ``data/<name>.json`` (test/eval data).
+    """
+    parts = rel.split("/")
+    if "tests" in parts[:-1] or "evals" in parts[:-1]:
+        return True
+    if len(parts) == 2 and parts[0] == "data" and parts[1].endswith(".json"):
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -151,8 +170,13 @@ class KnowledgeIndex:
                 if name.startswith("."):
                     continue
                 path = Path(root) / name
-                if path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                    yield path
+                if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                    continue
+                rel = self._relative(path)
+                if _is_excluded_path(rel):
+                    logger.info("skipping excluded knowledge base file: %s", rel)
+                    continue
+                yield path
 
     def _relative(self, path: Path) -> str:
         return path.relative_to(self._kb_root).as_posix()
@@ -185,6 +209,15 @@ class KnowledgeIndex:
                 "mtime": mtime,
             }
             items.append((chunk.text, metadata, summary))
+        if len(items) > _MAX_FILE_CHUNKS:
+            logger.warning(
+                "file %s produced %d chunks exceeding safety cap %d; indexing first %d",
+                rel,
+                len(items),
+                _MAX_FILE_CHUNKS,
+                _MAX_FILE_CHUNKS,
+            )
+            items = items[:_MAX_FILE_CHUNKS]
         return items
 
     def _existing_state(self) -> tuple[set[str], dict[str, float]]:
@@ -220,7 +253,27 @@ class KnowledgeIndex:
             offset += _METADATA_BATCH
         return stored_paths, stored_mtimes
 
-    def rebuild(self) -> int:
+    def _reset_collection(self) -> None:
+        """Delete and recreate the KB collection (full wipe)."""
+        assert self._client is not None
+        try:
+            self._client.delete_collection(self._collection_name)
+        except Exception as exc:  # noqa: BLE001 - collection may not exist on first reset
+            logger.info(
+                "reset: collection %s not found or delete failed: %s",
+                self._collection_name,
+                exc,
+            )
+        self._collection = self._client.get_or_create_collection(
+            name=self._collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+        logger.warning(
+            "knowledge base collection %s reset (old entries deleted)",
+            self._collection_name,
+        )
+
+    def rebuild(self, *, reset: bool = False) -> int:
         """Incremental rebuild: index new/changed files, delete stale entries.
 
         Returns the number of chunks indexed/updated in this pass.
@@ -234,6 +287,8 @@ class KnowledgeIndex:
             except RuntimeError as exc:
                 logger.warning("knowledge index unavailable: %s", exc)
                 return 0
+            if reset:
+                self._reset_collection()
 
             files = list(self._iter_files())
             stored_paths, stored_mtimes = self._existing_state()
@@ -264,23 +319,42 @@ class KnowledgeIndex:
                 if not items:
                     continue
                 try:
-                    vectors = self._provider.embed([item[2] for item in items])
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("embedding failed for %s: %s; skipping", rel, exc)
-                    continue
-                texts = [item[0] for item in items]
-                metadatas = [item[1] for item in items]
-                ids = [f"{rel}#{idx}" for idx in range(len(items))]
-                try:
                     self._collection.delete(where={"file_path": rel})  # type: ignore[union-attr]
-                    self._collection.add(  # type: ignore[union-attr]
-                        ids=ids,
-                        documents=texts,
-                        embeddings=vectors,
-                        metadatas=metadatas,
-                    )
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("chroma add failed for %s: %s", rel, exc)
+                    logger.warning("chroma delete failed for %s: %s", rel, exc)
+                    continue
+
+                inserted_ids: list[str] = []
+                batch_failed = False
+                for start in range(0, len(items), _ADD_BATCH_SIZE):
+                    batch = items[start : start + _ADD_BATCH_SIZE]
+                    try:
+                        vectors = self._provider.embed([item[2] for item in batch])
+                        texts = [item[0] for item in batch]
+                        metadatas = [item[1] for item in batch]
+                        ids = [f"{rel}#{idx}" for idx in range(start, start + len(batch))]
+                        self._collection.add(  # type: ignore[union-attr]
+                            ids=ids,
+                            documents=texts,
+                            embeddings=vectors,
+                            metadatas=metadatas,
+                        )
+                        inserted_ids.extend(ids)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "chroma add failed for %s (batch starting at chunk %d): %s; rolling back file",
+                            rel,
+                            start,
+                            exc,
+                        )
+                        if inserted_ids:
+                            try:
+                                self._collection.delete(ids=inserted_ids)  # type: ignore[union-attr]
+                            except Exception as rollback_exc:  # noqa: BLE001
+                                logger.warning("rollback delete failed for %s: %s", rel, rollback_exc)
+                        batch_failed = True
+                        break
+                if batch_failed:
                     continue
                 total += len(items)
 

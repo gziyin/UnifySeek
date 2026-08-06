@@ -8,6 +8,8 @@ from ai_dev_researcher.storage.embedding_provider import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
 
+_ADD_BATCH_SIZE = 1000
+
 try:
     import chromadb
     from chromadb.config import Settings as ChromaSettings
@@ -98,35 +100,59 @@ class VectorStore:
         return CHROMA_AVAILABLE
 
     def index_document(self, *, artifact_id: str, text: str) -> int:
-        """分块 + embedding + 写入 Chroma。返回 chunk 数。"""
+        """Chunk + embed + write to Chroma. Returns chunk count."""
         self._ensure_client()
         chunks = split_text_into_chunks(text)
         if not chunks:
             return 0
-        texts = [chunk[0] for chunk in chunks]
+        # upsert: delete existing entries first so re-upload/re-parse stays consistent.
         try:
-            vectors = self._provider.embed(texts)
+            self._collection.delete(where={"artifact_id": artifact_id})
         except Exception as exc:  # noqa: BLE001
-            logger.warning("embedding failed for %s: %s; skipping index", artifact_id, exc)
+            logger.warning("delete failed for %s: %s; skipping index", artifact_id, exc)
             return 0
-        ids = [f"{artifact_id}#{idx}" for idx in range(len(chunks))]
-        metadatas = [
-            {
-                "artifact_id": artifact_id,
-                "chunk_index": idx,
-                "start_char": chunk[1],
-                "end_char": chunk[2],
-            }
-            for idx, chunk in enumerate(chunks)
-        ]
-        # upsert：同一 artifact 先删后插，保证重新上传/重解析时索引一致。
-        self._collection.delete(where={"artifact_id": artifact_id})
-        self._collection.add(
-            ids=ids,
-            documents=texts,
-            embeddings=vectors,
-            metadatas=metadatas,
-        )
+
+        # Chroma add has a per-call batch limit; embed + add in batches of
+        # _ADD_BATCH_SIZE. On a batch failure, roll back inserted ids for this
+        # artifact to avoid a half-indexed state.
+        inserted_ids: list[str] = []
+        try:
+            for start in range(0, len(chunks), _ADD_BATCH_SIZE):
+                batch = chunks[start : start + _ADD_BATCH_SIZE]
+                texts = [chunk[0] for chunk in batch]
+                vectors = self._provider.embed(texts)
+                ids = [f"{artifact_id}#{idx}" for idx in range(start, start + len(batch))]
+                metadatas = [
+                    {
+                        "artifact_id": artifact_id,
+                        "chunk_index": idx,
+                        "start_char": chunk[1],
+                        "end_char": chunk[2],
+                    }
+                    for idx, chunk in enumerate(batch, start=start)
+                ]
+                self._collection.add(
+                    ids=ids,
+                    documents=texts,
+                    embeddings=vectors,
+                    metadatas=metadatas,
+                )
+                inserted_ids.extend(ids)
+        except Exception as exc:  # noqa: BLE001
+            if inserted_ids:
+                try:
+                    self._collection.delete(ids=inserted_ids)
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.warning(
+                        "rollback delete failed for %s: %s", artifact_id, rollback_exc
+                    )
+            logger.warning(
+                "index_document failed for %s after %d chunks: %s; rolled back",
+                artifact_id,
+                len(inserted_ids),
+                exc,
+            )
+            return 0
         logger.info("indexed %d chunks for artifact %s", len(chunks), artifact_id)
         return len(chunks)
 
