@@ -74,3 +74,10 @@ class ArtifactContentResponse(BaseModel):
     artifact_id: UUID
     kind: str
     content: str
+
+
+class ReportJsonResponse(BaseModel):
+    artifact_id: UUID
+    report: dict | None = None
+    degraded: bool = False
+    reason: str | None = None

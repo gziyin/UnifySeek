@@ -92,6 +92,21 @@ class RunRepository:
             return None
         return self._row_to_run(row)
 
+    async def list_for_session(
+        self, session_id: UUID, limit: int = 50, offset: int = 0
+    ) -> list[Run]:
+        cursor = await self._conn.execute(
+            """
+            SELECT * FROM runs
+            WHERE session_id = ?
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (str(session_id), limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_run(row) for row in rows]
+
     async def update_status(
         self,
         run_id: UUID,

@@ -5,35 +5,65 @@ import {
   createRun,
   createSession,
   getArtifactContent,
+  getReportJson,
   getRun,
   getSession,
   listEvents,
   uploadFile,
 } from "../api/client";
-import type { Artifact, Run } from "../domain/schemas";
+import type { Artifact, ResearchReport, Run } from "../domain/schemas";
 import { ResearchEventSchema } from "../domain/schemas";
-import { AgentTimeline } from "../components/AgentTimeline";
-import { ReportViewer } from "../components/ReportViewer";
-import { ResearchBriefForm } from "../components/ResearchBriefForm";
-import { SourceLedger } from "../components/SourceLedger";
-import { UploadPanel } from "../components/UploadPanel";
+import { Background, readBgChoice } from "../components/Background";
+import { TopBar } from "../components/TopBar";
+import { MODE_MAX_SOURCES, QueryCard, type ResearchMode } from "../components/QueryCard";
+import { TimelineCard } from "../components/TimelineCard";
+import { ReportCard } from "../components/ReportCard";
+import { Ledger } from "../components/Ledger";
+import { HistoryDrawer } from "../components/HistoryDrawer";
 import { initialRunViewState, runEventReducer } from "../state/runEventReducer";
 
 const SESSION_KEY = "ai_dev_researcher.session_id";
+const BG_KEY = "unifyseek.bg";
+
+const EXAMPLES: Array<{ label: string; text: string }> = [
+  {
+    label: "🧪 框架选型调研",
+    text: "对比 FastAPI、Express、Gin 在高并发场景下的性能表现，包括延迟、吞吐量和资源占用。",
+  },
+  {
+    label: "📄 论文内容总结",
+    text: "总结《Attention Is All You Need》论文的核心创新点和对后续研究的影响。",
+  },
+  {
+    label: "🔍 技术事实核查",
+    text: "核查 Python 3.13 是否真的比 3.12 快 60%，引用官方基准测试和独立评测。",
+  },
+  {
+    label: "📊 竞品对比分析",
+    text: "对比 LangGraph、CrewAI、AutoGen 三个 Agent 框架在架构、生态和适用场景上的区别。",
+  },
+];
 
 export function ResearchWorkbench() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [reportMarkdown, setReportMarkdown] = useState<string>("");
+  const [reportJson, setReportJson] = useState<ResearchReport | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [view, dispatch] = useReducer(runEventReducer, initialRunViewState);
-  // lastSeq ??????? ref ???? WebSocket ??????????
+  const [mode, setMode] = useState<ResearchMode>("medium");
+  const [question, setQuestion] = useState("");
+  const [bgChoice, setBgChoice] = useState<1 | 2>(() => readBgChoice());
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const historyButtonRef = useRef<HTMLButtonElement | null>(null);
+  // lastSeq ref 供 WebSocket 重连时续接事件流
   const lastSeqRef = useRef<number>(0);
   useEffect(() => {
     lastSeqRef.current = view.lastSeq;
   }, [view.lastSeq]);
 
+  // ---- session boot（原样保留）----
   useEffect(() => {
     let cancelled = false;
     async function boot() {
@@ -76,6 +106,7 @@ export function ResearchWorkbench() {
     };
   }, []);
 
+  // ---- WS + hydrate + 轮询 + 退避重连（原样保留）----
   useEffect(() => {
     if (!run) {
       return;
@@ -134,7 +165,6 @@ export function ResearchWorkbench() {
           return;
         }
         setRun(fresh);
-        // run 到达终态后停止轮询（WS 仍保持连接，承担后续兜底）
         if (
           fresh.status === "succeeded" ||
           fresh.status === "failed" ||
@@ -154,17 +184,18 @@ export function ResearchWorkbench() {
       }
       socket?.close();
     };
-    // intentionally depend on run id only; lastSeq is read at connect time via closure refresh on remount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run?.run_id]);
 
+  const reportArtifactId = view.reportArtifactId ?? run?.report_artifact_id ?? undefined;
+
+  // ---- 报告 markdown 拉取（原样保留）----
   useEffect(() => {
-    const artifactId = view.reportArtifactId ?? run?.report_artifact_id ?? undefined;
-    if (!artifactId) {
+    if (!reportArtifactId) {
       return;
     }
     let cancelled = false;
-    void getArtifactContent(artifactId).then((content) => {
+    void getArtifactContent(reportArtifactId).then((content) => {
       if (!cancelled) {
         setReportMarkdown(content);
       }
@@ -172,7 +203,26 @@ export function ResearchWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, [view.reportArtifactId, run?.report_artifact_id]);
+  }, [reportArtifactId]);
+
+  // ---- 结构化报告 JSON（可选交互）----
+  useEffect(() => {
+    if (!reportArtifactId) {
+      setReportJson(null);
+      return;
+    }
+    let cancelled = false;
+    void getReportJson(reportArtifactId)
+      .then((res) => {
+        if (!cancelled) setReportJson(res.report ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setReportJson(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reportArtifactId]);
 
   const handleUpload = useCallback(
     async (file: File) => {
@@ -186,16 +236,17 @@ export function ResearchWorkbench() {
   );
 
   const handleSubmit = useCallback(
-    async (question: string) => {
+    async (submittedQuestion: string, submittedMode: ResearchMode) => {
       if (!sessionId) {
         throw new Error("session not ready");
       }
       dispatch({ type: "reset" });
       setReportMarkdown("");
+      setReportJson(null);
       const created = await createRun(sessionId, {
-        question,
+        question: submittedQuestion,
         uploaded_artifact_ids: artifacts.map((item) => item.artifact_id),
-        max_web_sources: 8,
+        max_web_sources: MODE_MAX_SOURCES[submittedMode],
       });
       setRun(created);
     },
@@ -216,52 +267,107 @@ export function ResearchWorkbench() {
     }
   }, [run]);
 
+  // ---- 历史抽屉恢复：设置会话与 run，由 run?.run_id effect 自动重连 WS / 拉报告 ----
+  const handleRestore = useCallback(
+    ({ sessionId: sid, run: restored }: { sessionId: string; run: Run }) => {
+      setSessionId(sid);
+      setRun(restored);
+      dispatch({ type: "reset" });
+      setReportMarkdown("");
+      setReportJson(null);
+      setDrawerOpen(false);
+      historyButtonRef.current?.focus();
+    },
+    [],
+  );
+
+  const handleBgChange = useCallback((choice: 1 | 2) => {
+    setBgChoice(choice);
+    localStorage.setItem(BG_KEY, String(choice));
+  }, []);
+
   const active =
     run?.status === "pending" || run?.status === "running" || run?.status === "cancelling";
+  const reportReady = Boolean(reportArtifactId);
+  const stageClass =
+    (run ? " stage-running" : "") + (reportReady ? " stage-report" : "");
 
   return (
-    <div className="app-shell">
-      <header className="brand-bar">
-        <div>
-          <h1>AI Dev Researcher</h1>
-          <p>DeepAgents 多智能体调研：网页取证 + 文档分析 + 本地知识库</p>
-        </div>
-        <div>
-          <span
-            className={`status-pill ${run?.status === "failed" ? "danger" : active ? "warn" : ""}`}
-            role="status"
-            aria-live="polite"
-          >
-            {run ? `run: ${run.status}` : "待命"}
-          </span>
-        </div>
-      </header>
+    <>
+      <Background choice={bgChoice} />
+      <TopBar
+        bgChoice={bgChoice}
+        onBgChange={handleBgChange}
+        drawerOpen={drawerOpen}
+        onOpenDrawer={() => setDrawerOpen(true)}
+        historyRef={historyButtonRef}
+      />
+      <HistoryDrawer
+        open={drawerOpen}
+        onClose={() => {
+          setDrawerOpen(false);
+          historyButtonRef.current?.focus();
+        }}
+        onRestore={handleRestore}
+      />
+
+      <div className={`app-shell${stageClass}`}>
+        <main className="main-stage">
+          <div className="content-stack">
+            <div className="brand">
+              <div className="brand-logo">
+                <div className="brand-mark">U</div>
+              </div>
+              <h1>UnifySeek</h1>
+              <p>深度调研系统 · 证据优先 · 可追溯 · 可验证</p>
+            </div>
+
+            <QueryCard
+              question={question}
+              onQuestionChange={setQuestion}
+              disabled={!sessionId || active}
+              mode={mode}
+              onModeChange={setMode}
+              onSubmit={handleSubmit}
+              onCancel={handleCancel}
+              canCancel={Boolean(active)}
+              artifacts={artifacts}
+              onUpload={handleUpload}
+              uploadDisabled={!sessionId || active}
+            />
+
+            <TimelineCard state={view} />
+
+            <ReportCard
+              markdown={reportMarkdown}
+              artifactId={reportArtifactId}
+              degraded={view.reportDegraded}
+              reason={view.reportReason}
+              reportJson={reportJson}
+            />
+
+            <Ledger sources={view.sources} />
+
+            <div className="examples-label">试试这些例子 →</div>
+            <div className="examples">
+              {EXAMPLES.map((example) => (
+                <button
+                  key={example.label}
+                  type="button"
+                  className="example-tag"
+                  onClick={() => setQuestion(example.text)}
+                >
+                  {example.label}
+                </button>
+              ))}
+            </div>
+
+            <p className="footer-note">UnifySeek 可能会出错 · 所有结论请结合原始来源核验</p>
+          </div>
+        </main>
+      </div>
 
       {bootError ? <p className="error-text">{bootError}</p> : null}
-
-      <div className="workbench">
-        <div style={{ display: "grid", gap: "1rem", alignContent: "start" }}>
-          <ResearchBriefForm
-            disabled={!sessionId || active}
-            onSubmit={handleSubmit}
-            onCancel={handleCancel}
-            canCancel={Boolean(active)}
-          />
-          <UploadPanel artifacts={artifacts} disabled={!sessionId || active} onUpload={handleUpload} />
-        </div>
-        <div style={{ display: "grid", gap: "1rem", alignContent: "start" }}>
-          <ReportViewer
-            markdown={reportMarkdown}
-            artifactId={view.reportArtifactId ?? run?.report_artifact_id ?? undefined}
-            degraded={view.reportDegraded}
-            reason={view.reportReason}
-          />
-          <AgentTimeline state={view} />
-        </div>
-        <div style={{ display: "grid", gap: "1rem", alignContent: "start" }}>
-          <SourceLedger sources={view.sources} />
-        </div>
-      </div>
-    </div>
+    </>
   );
 }

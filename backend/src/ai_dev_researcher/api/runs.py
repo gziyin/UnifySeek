@@ -48,6 +48,17 @@ async def create_run(
     return await _to_run_response(state, run)
 
 
+@router.get("/api/sessions/{session_id}/runs", response_model=list[RunResponse])
+async def list_session_runs(
+    session_id: UUID,
+    limit: int = 50,
+    offset: int = 0,
+    state: AppState = Depends(get_app_state),
+) -> list[RunResponse]:
+    runs = await state.runs.list_for_session(session_id, limit=limit, offset=offset)
+    return [await _to_run_response(state, run) for run in runs]
+
+
 @router.get("/api/runs/{run_id}", response_model=RunResponse)
 async def get_run(
     run_id: UUID,

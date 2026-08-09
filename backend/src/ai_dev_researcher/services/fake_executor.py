@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import UUID, uuid4
 
 from ai_dev_researcher.domain.artifacts import Artifact, ArtifactKind, ParseStatus
@@ -215,6 +216,15 @@ class FakeResearchExecutor:
             report_artifact_id = uuid4()
             report_path = self._paths.report_path(run.session_id, run_id, report_artifact_id)
             atomic_write_text(report_path, markdown, root=self._paths.sessions_root)
+            # 结构化报告 JSON sidecar：与 markdown 同目录，供 /api/artifacts/{id}/report-json 读取。
+            report_json_path = report_path.with_name(
+                f"report-{report_artifact_id}.json"
+            )
+            atomic_write_text(
+                report_json_path,
+                json.dumps(report.model_dump(mode="json"), ensure_ascii=False),
+                root=self._paths.sessions_root,
+            )
             artifact = Artifact(
                 artifact_id=report_artifact_id,
                 session_id=run.session_id,
@@ -225,6 +235,7 @@ class FakeResearchExecutor:
                 size_bytes=len(markdown.encode("utf-8")),
                 parse_status=ParseStatus.SKIPPED,
                 original_storage_path=str(report_path),
+                normalized_storage_path=str(report_json_path),
             )
             await self._artifacts.create(artifact)
             await self._publisher.publish(

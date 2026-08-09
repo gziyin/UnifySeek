@@ -1,12 +1,17 @@
 import {
   ArtifactSchema,
+  ReportJsonResponseSchema,
   ResearchEventSchema,
+  RunListResponseSchema,
   RunSchema,
+  SessionListItemSchema,
   SessionSchema,
   type Artifact,
+  type ReportJsonResponse,
   type ResearchEvent,
   type Run,
   type Session,
+  type SessionListItem,
 } from "../domain/schemas";
 
 export class ApiError extends Error {
@@ -104,4 +109,19 @@ export async function getArtifactContent(artifactId: string): Promise<string> {
 
 export function artifactDownloadUrl(artifactId: string): string {
   return `/api/artifacts/${artifactId}/download`;
+}
+
+export async function listSessions(): Promise<SessionListItem[]> {
+  const response = await fetch("/api/sessions");
+  return parseJson(response, SessionListItemSchema.array());
+}
+
+export async function listRunsForSession(sessionId: string): Promise<Run[]> {
+  const response = await fetch(`/api/sessions/${sessionId}/runs`);
+  return parseJson(response, RunListResponseSchema);
+}
+
+export async function getReportJson(artifactId: string): Promise<ReportJsonResponse> {
+  const response = await fetch(`/api/artifacts/${artifactId}/report-json`);
+  return parseJson(response, ReportJsonResponseSchema);
 }

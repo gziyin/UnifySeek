@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import UUID
 
@@ -7,7 +8,11 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
 
 from ai_dev_researcher.api.dependencies import AppState, get_app_state
-from ai_dev_researcher.api.schemas import ArtifactContentResponse, ArtifactResponse
+from ai_dev_researcher.api.schemas import (
+    ArtifactContentResponse,
+    ArtifactResponse,
+    ReportJsonResponse,
+)
 from ai_dev_researcher.core.errors import ArtifactAccessError, ArtifactNotFoundError
 from ai_dev_researcher.core.security import ensure_within_root
 from ai_dev_researcher.domain.artifacts import ArtifactKind
@@ -95,4 +100,33 @@ async def download_artifact(
         media_type=artifact.mime_type,
         filename=artifact.display_name,
         content_disposition_type="attachment",
+    )
+
+
+@router.get("/{artifact_id}/report-json", response_model=ReportJsonResponse)
+async def get_report_json(
+    artifact_id: UUID,
+    state: AppState = Depends(get_app_state),
+) -> ReportJsonResponse:
+    artifact = await state.artifacts.get(artifact_id)
+    if artifact is None:
+        raise ArtifactNotFoundError(f"artifact not found: {artifact_id}")
+    if artifact.kind != ArtifactKind.REPORT or not artifact.normalized_storage_path:
+        return ReportJsonResponse(
+            artifact_id=artifact_id,
+            report=None,
+            degraded=True,
+            reason="no structured report",
+        )
+    path = ensure_within_root(
+        Path(artifact.normalized_storage_path),
+        state.paths.sessions_root,
+    )
+    if not path.exists():
+        raise ArtifactNotFoundError("artifact file missing")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    return ReportJsonResponse(
+        artifact_id=artifact_id,
+        report=report,
+        degraded=False,
     )

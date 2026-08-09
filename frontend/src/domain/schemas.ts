@@ -53,7 +53,76 @@ export const ResearchEventSchema = z.object({
   payload: z.record(z.any()),
 });
 
+// GET /api/sessions 列表项（含 display_name；SessionSchema 用于单条详情）
+export const SessionListItemSchema = z.object({
+  session_id: z.string().uuid(),
+  display_name: z.string(),
+  status: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+
+export const RunListResponseSchema = z.array(RunSchema);
+
+// ---- 结构化报告（report-json）----
+export const ResearchClaimSchema = z
+  .object({
+    id: z.string(),
+    statement: z.string(),
+    citation_ids: z.array(z.string()),
+    confidence: z.enum(["high", "medium", "low"]),
+  })
+  .passthrough();
+
+export const ReportSectionSchema = z
+  .object({
+    heading: z.string(),
+    claims: z.array(ResearchClaimSchema),
+  })
+  .passthrough();
+
+export const DisagreementSideSchema = z
+  .object({
+    position: z.string(),
+    citation_ids: z.array(z.string()),
+  })
+  .passthrough();
+
+export const DisagreementSchema = z
+  .object({
+    topic: z.string(),
+    claim_ids: z.array(z.string()),
+    sides: z.array(DisagreementSideSchema),
+  })
+  .passthrough();
+
+export const ResearchReportSchema = z
+  .object({
+    title: z.string(),
+    executive_summary_claim_ids: z.array(z.string()),
+    sections: z.array(ReportSectionSchema),
+    disagreements: z.array(DisagreementSchema).optional().default([]),
+    unknowns: z.array(z.string()).optional().default([]),
+    recommendations: z.array(ResearchClaimSchema).optional().default([]),
+  })
+  .passthrough();
+
+export const ReportJsonResponseSchema = z
+  .object({
+    artifact_id: z.string().uuid(),
+    report: ResearchReportSchema.nullable(),
+    degraded: z.boolean(),
+    reason: z.string().nullable(),
+  })
+  .passthrough();
+
 export type Session = z.infer<typeof SessionSchema>;
+export type SessionListItem = z.infer<typeof SessionListItemSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
 export type Run = z.infer<typeof RunSchema>;
 export type ResearchEvent = z.infer<typeof ResearchEventSchema>;
+export type ResearchClaim = z.infer<typeof ResearchClaimSchema>;
+export type ReportSection = z.infer<typeof ReportSectionSchema>;
+export type Disagreement = z.infer<typeof DisagreementSchema>;
+export type ResearchReport = z.infer<typeof ResearchReportSchema>;
+export type ReportJsonResponse = z.infer<typeof ReportJsonResponseSchema>;

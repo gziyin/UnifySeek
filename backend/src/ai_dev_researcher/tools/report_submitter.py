@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -109,11 +110,25 @@ async def _save_report_artifact(
     markdown: str,
     title: str,
     display_name: str | None = None,
+    report_json: dict | None = None,
 ) -> UUID:
     artifact_id = uuid4()
     # Issue 9: \u8d70 WorkspacePaths \u7c98\u6027\u89e3\u6790\uff08slug \u4f1a\u8bdd\u76ee\u5f55\uff09\uff0c\u4e25\u7981\u786c\u7f16\u7801 str(session_id)\u3002
     report_path = paths.report_path(session_id, run_id, artifact_id, display_name)
     atomic_write_text(report_path, markdown, root=paths.sessions_root)
+    # Structured JSON sidecar: persisted alongside the markdown for the
+    # interactive report viewer. Report artifacts keep the markdown in
+    # ``original_storage_path`` (get_artifact_content unaffected) and the JSON
+    # absolute path in ``normalized_storage_path``.
+    report_json_path: str | None = None
+    if report_json is not None:
+        sidecar = report_path.parent / f"report-{artifact_id}.json"
+        atomic_write_text(
+            sidecar,
+            json.dumps(report_json, ensure_ascii=False),
+            root=paths.sessions_root,
+        )
+        report_json_path = str(sidecar)
     artifact = Artifact(
         artifact_id=artifact_id,
         session_id=session_id,
@@ -124,6 +139,7 @@ async def _save_report_artifact(
         size_bytes=len(markdown.encode("utf-8")),
         parse_status=ParseStatus.SKIPPED,
         original_storage_path=str(report_path),
+        normalized_storage_path=report_json_path,
     )
     await artifacts.create(artifact)
     return artifact_id
@@ -195,6 +211,7 @@ async def submit_research_report_impl(
         markdown=markdown,
         title=title,
         display_name=display_name,
+        report_json=report.model_dump(mode="json") if report is not None else None,
     )
     return {
         "artifact_id": str(artifact_id),
