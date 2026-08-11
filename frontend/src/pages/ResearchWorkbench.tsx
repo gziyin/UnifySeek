@@ -4,6 +4,7 @@ import {
   cancelRun,
   createRun,
   createSession,
+  deleteArtifact,
   getArtifactContent,
   getReportJson,
   getRun,
@@ -235,6 +236,17 @@ export function ResearchWorkbench() {
     [sessionId],
   );
 
+  const handleDelete = useCallback(
+    async (artifactId: string) => {
+      if (!sessionId) {
+        throw new Error("session not ready");
+      }
+      await deleteArtifact(sessionId, artifactId);
+      setArtifacts((prev) => prev.filter((item) => item.artifact_id !== artifactId));
+    },
+    [sessionId],
+  );
+
   const handleSubmit = useCallback(
     async (submittedQuestion: string, submittedMode: ResearchMode) => {
       if (!sessionId) {
@@ -333,6 +345,7 @@ export function ResearchWorkbench() {
               canCancel={Boolean(active)}
               artifacts={artifacts}
               onUpload={handleUpload}
+              onDelete={handleDelete}
               uploadDisabled={!sessionId || active}
             />
 

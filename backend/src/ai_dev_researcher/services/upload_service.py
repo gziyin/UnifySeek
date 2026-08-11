@@ -58,7 +58,9 @@ class UploadService:
             raise InvalidUploadError("session already has maximum uploads")
 
         if len(data) > self._settings.max_upload_bytes:
-            raise InvalidUploadError("file exceeds 10 MiB limit")
+            raise InvalidUploadError(
+                f"file exceeds {self._settings.max_upload_bytes // (1024 * 1024)} MiB limit"
+            )
 
         display_name = sanitize_display_name(filename)
         mime = guess_mime(display_name) or content_type
@@ -130,3 +132,30 @@ class UploadService:
         if parse_error is not None:
             raise DocumentParseError(f"failed to parse upload: {parse_error}") from parse_error
         return artifact
+
+    async def delete_artifact(self, *, session_id: UUID, artifact_id: UUID) -> bool:
+        """Delete an uploaded artifact.
+
+        Only UPLOAD-kind artifacts owned by ``session_id`` are removed. The DB
+        record is deleted and the on-disk files (original + normalized) are
+        cleaned up fail-soft (removal failure is logged, never blocks).
+        """
+        artifact = await self._artifacts.get(artifact_id)
+        if (
+            artifact is None
+            or artifact.session_id != session_id
+            or artifact.kind != ArtifactKind.UPLOAD
+        ):
+            return False
+        await self._artifacts.delete(artifact_id)
+        for storage_path in (artifact.original_storage_path, artifact.normalized_storage_path):
+            if not storage_path:
+                continue
+            try:
+                target = Path(storage_path)
+                if target.exists():
+                    target.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("failed to remove upload file %s", storage_path)
+        await self._sessions.touch(session_id)
+        return True

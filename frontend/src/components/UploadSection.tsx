@@ -5,10 +5,11 @@ type Props = {
   artifacts: Artifact[];
   disabled?: boolean;
   onUpload: (file: File) => Promise<void>;
+  onDelete: (artifactId: string) => Promise<void>;
   open: boolean;
 };
 
-export function UploadSection({ artifacts, disabled, onUpload, open }: Props) {
+export function UploadSection({ artifacts, disabled, onUpload, onDelete, open }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [pendingName, setPendingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +45,7 @@ export function UploadSection({ artifacts, disabled, onUpload, open }: Props) {
             onChange={(event) => void handleFiles(event.target.files)}
           />
           <div>点击或拖拽上传 PDF / DOCX / MD / TXT</div>
-          <div className="upload-hint">单文件 ≤ 10 MiB，每会话最多 5 个</div>
+          <div className="upload-hint">单文件 ≤ 50 MiB，每会话最多 5 个</div>
         </div>
         {pendingName ? (
           <div className="upload-hint" style={{ marginTop: "0.4rem" }}>
@@ -56,10 +57,20 @@ export function UploadSection({ artifacts, disabled, onUpload, open }: Props) {
           <ul className="upload-list">
             {artifacts.map((item) => (
               <li key={item.artifact_id}>
-                <span>{item.display_name}</span>
+                <span className="upload-name">{item.display_name}</span>
                 <span className="mono" style={{ color: "var(--haze)" }}>
                   {item.parse_status}
                 </span>
+                <button
+                  type="button"
+                  className="upload-remove"
+                  title={`删除 ${item.display_name}`}
+                  aria-label={`删除 ${item.display_name}`}
+                  disabled={disabled}
+                  onClick={() => void onDelete(item.artifact_id)}
+                >
+                  ×
+                </button>
               </li>
             ))}
           </ul>

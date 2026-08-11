@@ -20,7 +20,7 @@ function ConfidenceBadge({ confidence }: { confidence: string }) {
     confidence === "high" ? "高" : confidence === "medium" ? "中" : "低";
   return (
     <span className={`conf-badge ${confidence}`} aria-label={`置信度 ${label}`}>
-      {confidence}
+      {label}
     </span>
   );
 }

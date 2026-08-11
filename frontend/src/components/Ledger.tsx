@@ -18,6 +18,17 @@ function typeHint(source_type: string): string {
   }
 }
 
+/** S/D/K 计数：按 source_type 映射（web→S、document→D、knowledge_base→K，与 typeHint 一致）。 */
+export function countSourcesByType(
+  sources: RunViewState["sources"],
+): { S: number; D: number; K: number } {
+  return {
+    S: sources.filter((s) => s.source_type === "web").length,
+    D: sources.filter((s) => s.source_type === "document").length,
+    K: sources.filter((s) => s.source_type === "knowledge_base").length,
+  };
+}
+
 function copyText(text: string) {
   void navigator.clipboard?.writeText(text).catch(() => {});
 }
@@ -74,9 +85,7 @@ function SourceItem({ item }: { item: RunViewState["sources"][number] }) {
 export function Ledger({ sources }: Props) {
   const [open, setOpen] = useState(false);
 
-  const level = (lvl: string) =>
-    sources.filter((s) => String(s.evidence_level).toLowerCase() === lvl).length;
-  const counts = { S: level("s"), D: level("d"), K: level("k") };
+  const counts = countSourcesByType(sources);
 
   return (
     <div className="ledger-section">

@@ -54,6 +54,19 @@ export async function uploadFile(sessionId: string, file: File): Promise<Artifac
   return parseJson(response, ArtifactSchema);
 }
 
+export async function deleteArtifact(sessionId: string, artifactId: string): Promise<void> {
+  const response = await fetch(`/api/sessions/${sessionId}/artifacts/${artifactId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new ApiError(
+      typeof data?.code === "string" ? data.code : "HTTP_ERROR",
+      typeof data?.message === "string" ? data.message : "failed to delete artifact",
+    );
+  }
+}
+
 export async function createRun(
   sessionId: string,
   body: {

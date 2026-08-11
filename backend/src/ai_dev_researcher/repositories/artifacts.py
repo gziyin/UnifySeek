@@ -81,3 +81,12 @@ class ArtifactRepository:
         )
         rows = await cursor.fetchall()
         return [self._row_to_artifact(row) for row in rows]
+
+    async def delete(self, artifact_id: UUID) -> bool:
+        """Delete the artifact DB record. Returns True if a row was removed."""
+        cursor = await self._conn.execute(
+            "DELETE FROM artifacts WHERE artifact_id = ?",
+            (str(artifact_id),),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0

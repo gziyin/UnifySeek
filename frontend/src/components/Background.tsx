@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import bg1 from "../assets/bg-1.png";
 import bg2 from "../assets/bg-2.png";
 
@@ -17,33 +17,28 @@ type Props = {
 
 /**
  * 双背景层 + 渐变遮罩。
- * 选中的背景立即渲染；另一张在首帧后（懒加载）再挂载。
- * opacity 交叉淡入淡出由 CSS transition 处理。
+ * 挂载时即预加载两张背景，两个 .bg-layer 始终持有 backgroundImage，
+ * 切换仅靠 .active 的 opacity 交叉淡入，避免旧实现懒加载导致的闪烁/白屏。
  */
 export function Background({ choice }: Props) {
-  const [lazyLoaded, setLazyLoaded] = useState(false);
-
   useEffect(() => {
-    setLazyLoaded(false);
-    const id = window.requestAnimationFrame(() => {
-      window.setTimeout(() => setLazyLoaded(true), 120);
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [choice]);
-
-  const bg1Loaded = choice === 1 || lazyLoaded;
-  const bg2Loaded = choice === 2 || lazyLoaded;
+    // 预加载两张背景，保证切换时交叉淡入丝滑（无首次加载空白）。
+    for (const url of Object.values(BG_URLS)) {
+      const img = new Image();
+      img.src = url;
+    }
+  }, []);
 
   return (
     <>
       <div
         className={`bg-layer ${choice === 1 ? "active" : ""}`}
-        style={{ backgroundImage: bg1Loaded ? `url(${BG_URLS[1]})` : undefined }}
+        style={{ backgroundImage: `url(${BG_URLS[1]})` }}
         aria-hidden="true"
       />
       <div
         className={`bg-layer ${choice === 2 ? "active" : ""}`}
-        style={{ backgroundImage: bg2Loaded ? `url(${BG_URLS[2]})` : undefined }}
+        style={{ backgroundImage: `url(${BG_URLS[2]})` }}
         aria-hidden="true"
       />
       <div className="bg-overlay" aria-hidden="true" />

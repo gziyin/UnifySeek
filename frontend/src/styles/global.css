@@ -65,6 +65,7 @@ code,
   background-position: center;
   opacity: 0;
   transition: opacity 0.8s ease;
+  will-change: opacity;
   pointer-events: none;
 }
 .bg-layer.active {
@@ -406,8 +407,39 @@ code,
 }
 .upload-list li {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+}
+.upload-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-remove {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--danger);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+.upload-remove:hover:not(:disabled) {
+  background: var(--danger-bg);
+}
+.upload-remove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* ============ 时间线卡片 ============ */
@@ -446,6 +478,115 @@ code,
   font-size: 1.05rem;
   font-weight: 600;
   color: var(--ink);
+}
+
+/* ============ 大阶段（规划 / 调研取证 / 报告生成） ============ */
+.phase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.phase-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-sm);
+  background: var(--glass-thin);
+  border: 1px solid var(--glass-border);
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+.phase-item.phase-active {
+  border-color: var(--info);
+  background: var(--info-bg);
+}
+.phase-status {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--haze);
+}
+.phase-spinner {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid var(--info);
+  border-top-color: transparent;
+  animation: phase-spin 0.8s linear infinite;
+}
+@keyframes phase-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.phase-check {
+  color: var(--success);
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1;
+  animation: phase-pop 0.35s var(--ease);
+}
+@keyframes phase-pop {
+  from {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.phase-label {
+  flex: 1;
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+.phase-item.phase-active .phase-label {
+  font-weight: 600;
+}
+.phase-time {
+  font-size: 0.78rem;
+  color: var(--haze);
+}
+.timeline-total {
+  margin: 0.4rem 0 0.9rem;
+  text-align: right;
+  font-size: 0.85rem;
+  color: var(--haze);
+}
+.timeline-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: transparent;
+  border: none;
+  color: var(--mist);
+  font-size: 0.78rem;
+  cursor: pointer;
+  padding: 0.2rem 0.3rem;
+  margin-bottom: 0.5rem;
+}
+.timeline-detail-toggle:hover {
+  color: var(--ink);
+}
+
+/* 减少动效偏好下关闭转圈/弹入 */
+@media (prefers-reduced-motion: reduce) {
+  .phase-spinner {
+    animation: none;
+  }
+  .phase-check {
+    animation: none;
+  }
 }
 
 .status-pill {
@@ -856,7 +997,7 @@ code,
   padding: 0.05rem 0.45rem;
   border-radius: 9999px;
   font-size: 0.68rem;
-  font-weight: 600;
+  font-weight: 700;
   margin-top: 0.1rem;
 }
 .conf-badge.high {

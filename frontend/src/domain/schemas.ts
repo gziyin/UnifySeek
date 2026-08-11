@@ -56,7 +56,7 @@ export const ResearchEventSchema = z.object({
 // GET /api/sessions 列表项（含 display_name；SessionSchema 用于单条详情）
 export const SessionListItemSchema = z.object({
   session_id: z.string().uuid(),
-  display_name: z.string(),
+  display_name: z.string().nullable(),
   status: z.string(),
   created_at: z.string(),
   updated_at: z.string(),

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Response, UploadFile
 
 from ai_dev_researcher.api.dependencies import AppState, get_app_state
 from ai_dev_researcher.api.schemas import ArtifactResponse
-from ai_dev_researcher.core.errors import InvalidUploadError
+from ai_dev_researcher.core.errors import ArtifactNotFoundError, InvalidUploadError
 
 router = APIRouter(tags=["artifacts"])
 
@@ -51,3 +51,18 @@ async def list_artifacts(
     await state.session_service.get_session(session_id)
     items = await state.artifacts.list_for_session(session_id)
     return [_to_response(item) for item in items]
+
+
+@router.delete("/api/sessions/{session_id}/artifacts/{artifact_id}", status_code=204)
+async def delete_artifact(
+    session_id: UUID,
+    artifact_id: UUID,
+    state: AppState = Depends(get_app_state),
+) -> Response:
+    deleted = await state.upload_service.delete_artifact(
+        session_id=session_id,
+        artifact_id=artifact_id,
+    )
+    if not deleted:
+        raise ArtifactNotFoundError("artifact not found or not an upload")
+    return Response(status_code=204)

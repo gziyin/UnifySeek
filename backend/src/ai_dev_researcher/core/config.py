@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # Phase-1 vertical slice uses a fake executor until DeepAgents is wired.
     fake_agent_mode: bool = True
 
-    max_upload_bytes: int = 10 * 1024 * 1024
+    max_upload_bytes: int = 50 * 1024 * 1024
     max_uploads_per_session: int = 5
     max_normalized_chars: int = 200_000
     ws_send_queue_size: int = 256

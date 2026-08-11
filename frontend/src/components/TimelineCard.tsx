@@ -1,10 +1,51 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ResearchEvent } from "../domain/schemas";
-import type { RunViewState } from "../state/runEventReducer";
+import { type Phase, type RunViewState } from "../state/runEventReducer";
 
 type Props = {
   state: RunViewState;
 };
+
+function formatMs(ms: number): string {
+  const clamped = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(clamped / 60);
+  const s = clamped % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function statusFor(state: RunViewState) {
+  const text =
+    state.connection === "connected"
+      ? "研究中"
+      : state.connection === "connecting"
+        ? "连接中"
+        : state.connection === "reconnecting"
+          ? "重连中"
+          : "待命";
+  const warn = state.connection === "reconnecting" || state.connection === "connecting";
+  return { text, warn };
+}
+
+/** 大阶段卡片：进行中转圈、完成 ✔、待开始灰点；各阶段独立计时。 */
+function PhaseItem({ phase, now }: { phase: Phase; now: number }) {
+  const elapsed =
+    phase.status === "active" && phase.startedAt ? now - phase.startedAt : phase.elapsedMs;
+  return (
+    <div className={`phase-item phase-${phase.status}`}>
+      <span className="phase-status" aria-hidden="true">
+        {phase.status === "active" ? (
+          <span className="phase-spinner" />
+        ) : phase.status === "done" ? (
+          <span className="phase-check">✔</span>
+        ) : (
+          <span className="phase-dot" />
+        )}
+      </span>
+      <span className="phase-label">{phase.label}</span>
+      <span className="phase-time mono">{formatMs(elapsed)}</span>
+    </div>
+  );
+}
 
 function labelFor(event: ResearchEvent): string {
   switch (event.type) {
@@ -206,21 +247,24 @@ function TimelineItem({ event }: { event: ResearchEvent }) {
   );
 }
 
-function statusFor(state: RunViewState) {
-  const text =
-    state.connection === "connected"
-      ? "研究中"
-      : state.connection === "connecting"
-        ? "连接中"
-        : state.connection === "reconnecting"
-          ? "重连中"
-          : "待命";
-  const warn = state.connection === "reconnecting" || state.connection === "connecting";
-  return { text, warn };
-}
-
 export function TimelineCard({ state }: Props) {
   const { text, warn } = statusFor(state);
+  const [detailOpen, setDetailOpen] = useState(false);
+  // 进行中每秒触发一次重渲染，刷新 active 阶段与总计时显示。
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (state.runFinished) return;
+    const id = window.setInterval(() => setTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [state.runFinished]);
+
+  const now = performance.now();
+  const totalElapsed = state.totalStartedAt
+    ? state.runFinished
+      ? state.totalElapsedMs
+      : now - state.totalStartedAt
+    : 0;
+
   return (
     <section className="glass-card timeline-card">
       <div className="timeline-expand">
@@ -236,26 +280,38 @@ export function TimelineCard({ state }: Props) {
               <span>{text}</span>
             </span>
           </div>
-          {state.todos.length ? (
-            <ul className="todo-list">
-              {state.todos.map((item) => (
-                <li key={item.id}>
-                  <span className="mono" style={{ color: "var(--haze)" }}>
-                    {item.status}
-                  </span>{" "}
-                  {item.content}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <div className="timeline-list">
-            {state.events.length === 0 ? (
-              <p style={{ color: "var(--mist)", fontSize: "0.85rem" }}>等待事件…</p>
-            ) : null}
-            {state.events.map((event) => (
-              <TimelineItem key={`${event.event_id}-${event.seq}`} event={event} />
+
+          <div className="phase-list" aria-label="执行阶段">
+            {state.phases.map((phase) => (
+              <PhaseItem key={phase.key} phase={phase} now={now} />
             ))}
           </div>
+
+          <div className="timeline-total mono" aria-live="polite">
+            总耗时 {formatMs(totalElapsed)}
+          </div>
+
+          <button
+            type="button"
+            className="timeline-detail-toggle"
+            onClick={() => setDetailOpen((v) => !v)}
+            aria-expanded={detailOpen}
+          >
+            <span>详细过程</span>
+            <span className="timeline-chevron" aria-hidden="true">
+              {detailOpen ? "▾" : "▸"}
+            </span>
+          </button>
+          {detailOpen ? (
+            <div className="timeline-list">
+              {state.events.length === 0 ? (
+                <p style={{ color: "var(--mist)", fontSize: "0.85rem" }}>等待事件…</p>
+              ) : null}
+              {state.events.map((event) => (
+                <TimelineItem key={`${event.event_id}-${event.seq}`} event={event} />
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

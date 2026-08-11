@@ -27,6 +27,7 @@ type Props = {
   canCancel?: boolean;
   artifacts: Artifact[];
   onUpload: (file: File) => Promise<void>;
+  onDelete: (artifactId: string) => Promise<void>;
   uploadDisabled?: boolean;
 };
 
@@ -41,6 +42,7 @@ export function QueryCard({
   canCancel,
   artifacts,
   onUpload,
+  onDelete,
   uploadDisabled,
 }: Props) {
   const [submitting, setSubmitting] = useState(false);
@@ -121,6 +123,7 @@ export function QueryCard({
           artifacts={artifacts}
           disabled={uploadDisabled || disabled || submitting}
           onUpload={onUpload}
+          onDelete={onDelete}
           open={uploadOpen}
         />
       </div>

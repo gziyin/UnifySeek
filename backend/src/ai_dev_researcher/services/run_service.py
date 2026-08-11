@@ -46,7 +46,30 @@ class RunService:
 
         active = await self._runs.find_active_for_session(session_id)
         if active is not None:
-            raise RunConflictError("session already has an active run")
+            if active.status == RunStatus.CANCELLING:
+                # 上一次 run 处于取消中但尚未收敛到终态（异步取消的竞态窗口）。
+                # 用户主动取消后想立即开始新研究：先兜底取消其后台任务，再把该 run
+                # 收敛为 cancelled（cancelling→cancelled 在 ALLOWED_TRANSITIONS 中合法），
+                # 然后允许创建新 run。其余 active 状态（RUNNING/PENDING）仍拒绝并发覆盖。
+                await self._task_manager.request_cancel(active.run_id)
+                current = await self._runs.get(active.run_id)
+                if current and current.status not in TERMINAL_RUN_STATUSES:
+                    await self._runs.update_status(
+                        active.run_id,
+                        RunStatus.CANCELLED,
+                        finished=True,
+                        cancel_requested=True,
+                        error_code="CANCELLED",
+                        error_message="Cancelled (superseded by new run)",
+                    )
+                    await self._publisher.publish(
+                        session_id=session_id,
+                        run_id=active.run_id,
+                        event_type="run.cancelled",
+                        payload={"reason": "cancelled_superseded_by_new_run"},
+                    )
+            else:
+                raise RunConflictError("session already has an active run")
 
         if request.uploaded_artifact_ids:
             found = await self._artifacts.get_many(request.uploaded_artifact_ids)
