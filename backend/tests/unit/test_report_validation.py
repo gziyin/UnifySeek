@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -81,6 +82,18 @@ async def _submit(env, report: dict) -> dict:
     )
 
 
+def _claim_confidence(report_json: dict, claim_id: str) -> str:
+    """从 sidecar report JSON 中取指定 claim 的 confidence（降级逻辑载体迁移到 JSON）。"""
+    for sec in report_json.get("sections", []):
+        for c in sec.get("claims", []):
+            if c["id"] == claim_id:
+                return c["confidence"]
+    for c in report_json.get("recommendations", []):
+        if c["id"] == claim_id:
+            return c["confidence"]
+    raise AssertionError(f"claim {claim_id} not found in report JSON")
+
+
 async def test_valid_report_passes(env):
     store = env[0]
     web_id = await _add_web_evidence(store, level="first_party")
@@ -113,7 +126,12 @@ async def test_high_confidence_snippet_only_auto_degrades_to_medium(env):
     assert result["reason"] is None
     artifact = await artifacts.get(UUID(result["artifact_id"]))
     content = Path(artifact.original_storage_path).read_text(encoding="utf-8")
-    assert "confidence=medium" in content
+    # 正文不再暴露 confidence；降级载体迁移到 sidecar JSON
+    assert "confidence=" not in content
+    sidecar = json.loads(
+        Path(artifact.normalized_storage_path).read_text(encoding="utf-8")
+    )
+    assert _claim_confidence(sidecar, "C1") == "medium"
 
 
 async def test_high_confidence_weak_secondary_auto_degrades_to_medium(env):
@@ -124,7 +142,12 @@ async def test_high_confidence_weak_secondary_auto_degrades_to_medium(env):
     assert result["reason"] is None
     artifact = await artifacts.get(UUID(result["artifact_id"]))
     content = Path(artifact.original_storage_path).read_text(encoding="utf-8")
-    assert "confidence=medium" in content
+    # 正文不再暴露 confidence；降级载体迁移到 sidecar JSON
+    assert "confidence=" not in content
+    sidecar = json.loads(
+        Path(artifact.normalized_storage_path).read_text(encoding="utf-8")
+    )
+    assert _claim_confidence(sidecar, "C1") == "medium"
 
 
 async def test_medium_confidence_secondary_passes(env):

@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from ai_dev_researcher.core.errors import ReportValidationError
 from ai_dev_researcher.domain.artifacts import Artifact, ArtifactKind, ParseStatus
 from ai_dev_researcher.domain.evidence import EvidenceRecord
-from ai_dev_researcher.domain.reports import ResearchClaim, ResearchReport
+from ai_dev_researcher.domain.reports import ReportSection, ResearchClaim, ResearchReport
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.storage.artifacts import (
@@ -91,10 +91,15 @@ def _heal_high_confidence(
         changed_ids.append(claim.id)
         return claim.model_copy(update={"confidence": "medium"})
 
-    sections = [
-        section.model_copy(update={"claims": [_heal_claim(c) for c in section.claims]})
-        for section in report.sections
-    ]
+    def _heal_section(sec) -> "ReportSection":
+        return sec.model_copy(
+            update={
+                "claims": [_heal_claim(c) for c in sec.claims],
+                "subsections": [_heal_section(sub) for sub in sec.subsections],
+            }
+        )
+
+    sections = [_heal_section(s) for s in report.sections]
     recommendations = [_heal_claim(c) for c in report.recommendations]
     if not changed_ids:
         return report, []
@@ -195,7 +200,9 @@ async def submit_research_report_impl(
         report = None
 
     if report is not None:
-        markdown = render_report_markdown(report, collect_claims(report))
+        markdown = render_report_markdown(
+            report, collect_claims(report), evidence_by_id=evidence_by_id
+        )
         title = report.title
         degraded = False
     else:

@@ -211,7 +211,12 @@ class FakeResearchExecutor:
                 recommendations=[claim_rec],
             )
             claims = collect_claims(report)
-            markdown = render_report_markdown(report, claims)
+            evidence_by_id = {web_id: web_evidence}
+            if run.request.uploaded_artifact_ids:
+                evidence_by_id[doc_id] = doc_evidence
+            markdown = render_report_markdown(
+                report, claims, evidence_by_id=evidence_by_id
+            )
 
             report_artifact_id = uuid4()
             report_path = self._paths.report_path(run.session_id, run_id, report_artifact_id)

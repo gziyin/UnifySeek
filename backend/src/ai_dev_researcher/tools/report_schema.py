@@ -30,7 +30,7 @@ class SubmitResearchReportArgs(BaseModel):
         description="执行摘要引用的 claim ID 列表。这些 ID 必须是本参数中 claims（sections/recommendations 内）真实存在的 id。",
     )
     sections: list[ReportSection] = Field(
-        description="报告正文分节。每节 heading + claims；每个 claim 的 citation_ids 必须是证据 ledger 中真实存在的证据 ID（形如 S1、S2、D1）。"
+        description="报告正文分节。每节 heading + claims（可为空，支持仅子节/仅表格），可递归 subsections（多级编号标题，如 一、/1.），可含可选 table 对比表；statement 写成完整句子/段落、可用 **粗体** 强调；每个 claim 的 citation_ids 必须是证据 ledger 中真实存在的证据 ID（形如 S1、S2、D1）。引用统一用 citation_ids，渲染层自动转 [n] 编号，不要手写编号。"
     )
     disagreements: list[Disagreement] = Field(
         default_factory=list,
@@ -42,5 +42,5 @@ class SubmitResearchReportArgs(BaseModel):
     )
     recommendations: list[ResearchClaim] = Field(
         min_length=1,
-        description="结论与建议。每个 claim 同样必须带 citation_ids，引用真实证据 ID。",
+        description="结论与建议。每个 claim 写成完整句子/段落，可用 **粗体** 强调关键结论；同样必须带 citation_ids，引用真实证据 ID（渲染层自动转 [n]）。",
     )

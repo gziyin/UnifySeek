@@ -76,7 +76,11 @@ async def test_main_flow_session_upload_run_report(client: AsyncClient):
     assert content_resp.status_code == 200
     content = content_resp.json()["content"]
     assert "DeepAgents" in content
-    assert "`S1`" in content
+    assert "[1]" in content  # 叙事化编号引用
+    assert "### Sources" in content
+    assert "https://example.com/deepagents" in content
+    assert "`S1`" not in content  # 证据 ID 不再暴露在正文
+    assert "confidence=" not in content
 
     conflict = await client.post(
         f"/api/sessions/{session_id}/runs",
