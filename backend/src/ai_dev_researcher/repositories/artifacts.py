@@ -90,3 +90,12 @@ class ArtifactRepository:
         )
         await self._conn.commit()
         return cursor.rowcount > 0
+
+    async def delete_by_session(self, session_id: UUID) -> int:
+        """Delete all artifacts of a session. Returns the number of rows removed."""
+        cursor = await self._conn.execute(
+            "DELETE FROM artifacts WHERE session_id = ?",
+            (str(session_id),),
+        )
+        await self._conn.commit()
+        return cursor.rowcount

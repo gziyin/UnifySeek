@@ -258,7 +258,10 @@ export function TimelineCard({ state }: Props) {
     return () => window.clearInterval(id);
   }, [state.runFinished]);
 
-  const now = performance.now();
+  // 用 Date.now() 与 reducer 的事件时间戳（epoch ms）保持同一时钟基准：reducer 的
+  // phase.startedAt / totalStartedAt 现取自事件 occurred_at，活跃阶段的实时刷新
+  // 必须用 wall-clock（Date.now()）相减，而不能用 performance.now()（#34 改造配套）。
+  const now = Date.now();
   const totalElapsed = state.totalStartedAt
     ? state.runFinished
       ? state.totalElapsedMs

@@ -157,6 +157,24 @@ class RunRepository:
         assert updated is not None
         return updated
 
+    async def run_ids_for_session(self, session_id: UUID) -> list[UUID]:
+        """All run ids for a session (used to clean per-run rows like evidence)."""
+        cursor = await self._conn.execute(
+            "SELECT run_id FROM runs WHERE session_id = ?",
+            (str(session_id),),
+        )
+        rows = await cursor.fetchall()
+        return [UUID(row["run_id"]) for row in rows]
+
+    async def delete_by_session(self, session_id: UUID) -> int:
+        """Delete all runs of a session. Returns the number of rows removed."""
+        cursor = await self._conn.execute(
+            "DELETE FROM runs WHERE session_id = ?",
+            (str(session_id),),
+        )
+        await self._conn.commit()
+        return cursor.rowcount
+
     async def mark_stale_interrupted(self) -> int:
         now = utc_now().isoformat()
         placeholders = ",".join("?" for _ in ACTIVE_RUN_STATUSES)

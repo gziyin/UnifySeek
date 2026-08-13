@@ -99,6 +99,18 @@ class EvidenceRepository:
             for row in rows
         ]
 
+    async def delete_by_run_ids(self, run_ids: list[UUID]) -> int:
+        """Delete evidence rows for the given runs. Returns the number removed."""
+        if not run_ids:
+            return 0
+        placeholders = ",".join("?" for _ in run_ids)
+        cursor = await self._conn.execute(
+            f"DELETE FROM evidence WHERE run_id IN ({placeholders})",
+            [str(item) for item in run_ids],
+        )
+        await self._conn.commit()
+        return cursor.rowcount
+
     async def allocate_ids(
         self,
         run_id: UUID,

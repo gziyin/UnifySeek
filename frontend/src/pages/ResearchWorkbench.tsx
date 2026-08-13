@@ -57,6 +57,7 @@ export function ResearchWorkbench() {
   const [question, setQuestion] = useState("");
   const [bgChoice, setBgChoice] = useState<1 | 2>(() => readBgChoice());
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [completedTip, setCompletedTip] = useState(false);
   const historyButtonRef = useRef<HTMLButtonElement | null>(null);
   // lastSeq ref 供 WebSocket 重连时续接事件流
   const lastSeqRef = useRef<number>(0);
@@ -173,6 +174,8 @@ export function ResearchWorkbench() {
           fresh.status === "cancelled"
         ) {
           window.clearInterval(poll);
+          // 研究完成引导提示（#35）：显示横幅，引导用户点「＋ 新建对话」开始下一项研究。
+          setCompletedTip(true);
         }
       });
     }, 1500);
@@ -255,6 +258,7 @@ export function ResearchWorkbench() {
       dispatch({ type: "reset" });
       setReportMarkdown("");
       setReportJson(null);
+      setCompletedTip(false);
       const created = await createRun(sessionId, {
         question: submittedQuestion,
         uploaded_artifact_ids: artifacts.map((item) => item.artifact_id),
@@ -287,11 +291,51 @@ export function ResearchWorkbench() {
       dispatch({ type: "reset" });
       setReportMarkdown("");
       setReportJson(null);
+      setCompletedTip(false);
       setDrawerOpen(false);
       historyButtonRef.current?.focus();
     },
     [],
   );
+
+  // 删除会话后，若删除的是当前激活会话，则清空工作区并移除 SESSION_KEY（#33）。
+  // 不自动新建会话，由用户在历史记录中点击「＋ 新建对话」（符合 #35 精神）。
+  const handleDeleteSession = useCallback(
+    (deletedId: string) => {
+      if (sessionId !== deletedId) {
+        return;
+      }
+      localStorage.removeItem(SESSION_KEY);
+      setSessionId(null);
+      setRun(null);
+      setReportMarkdown("");
+      setReportJson(null);
+      setArtifacts([]);
+      setQuestion("");
+      setCompletedTip(false);
+      dispatch({ type: "reset" });
+    },
+    [sessionId],
+  );
+
+  // 新建对话：创建新会话并清空工作区，不做自动跳转（#35）。
+  const handleNewChat = useCallback(async () => {
+    try {
+      const ns = await createSession();
+      localStorage.setItem(SESSION_KEY, ns.session_id);
+      setSessionId(ns.session_id);
+      dispatch({ type: "reset" });
+      setRun(null);
+      setReportMarkdown("");
+      setReportJson(null);
+      setArtifacts([]);
+      setQuestion("");
+      setCompletedTip(false);
+      setDrawerOpen(false);
+    } catch {
+      // 创建失败保留现状。
+    }
+  }, []);
 
   const handleBgChange = useCallback((choice: 1 | 2) => {
     setBgChoice(choice);
@@ -321,6 +365,8 @@ export function ResearchWorkbench() {
           historyButtonRef.current?.focus();
         }}
         onRestore={handleRestore}
+        onDeleteSession={handleDeleteSession}
+        onNewChat={() => void handleNewChat()}
       />
 
       <div className={`app-shell${stageClass}`}>
@@ -358,6 +404,12 @@ export function ResearchWorkbench() {
               reason={view.reportReason}
               reportJson={reportJson}
             />
+
+            {completedTip ? (
+              <div className="completed-tip" role="status">
+                ✅ 本次研究已完成，可点击历史记录中的「＋ 新建对话」开始下一项研究。
+              </div>
+            ) : null}
 
             <Ledger sources={view.sources} />
 

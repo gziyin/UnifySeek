@@ -11,7 +11,7 @@ export type Phase = {
   status: PhaseStatus;
   /** 已冻结耗时（ms）：status === "done" 时有效；active 时由组件用 startedAt 实时计算。 */
   elapsedMs: number;
-  /** performance.now() 时刻（ms）；active 阶段的开始时刻。 */
+  /** 事件时间戳（epoch ms，取自该阶段首事件的 occurred_at）；active 阶段的开始时刻。 */
   startedAt: number;
 };
 
@@ -39,7 +39,7 @@ export type RunViewState = {
   reportReason?: string;
   /** 3 个大阶段：规划 → 调研取证 → 报告生成。 */
   phases: Phase[];
-  /** 总计时起点（performance.now()，ms）；null 表示尚未开始（run.started 未到）。 */
+  /** 总计时起点（事件时间戳 epoch ms，取自 run.started 事件）；null 表示尚未开始。 */
   totalStartedAt: number | null;
   /** 总耗时冻结值（ms）：runFinished 后有效。 */
   totalElapsedMs: number;
@@ -83,6 +83,15 @@ export type RunViewAction =
 
 const TERMINAL_TYPES = new Set(["run.succeeded", "run.failed", "run.cancelled"]);
 
+/**
+ * 事件 → 时钟起点（epoch ms）。
+ *
+ * 计时以事件自身的 `occurred_at` 为准，而非共享的 `performance.now()`：hydrate 时
+ * `listEvents` 会把一整批事件在一次 dispatch 中灌入，若共用同一 `now`，前一阶段
+ * elapsed 会被后一阶段清零（#34）。解析失败兜底为 0（调用侧有 Math.max(0, ...) 保护）。
+ */
+const evTs = (event: ResearchEvent): number => Date.parse(event.occurred_at) || 0;
+
 /** 事件 → 大阶段映射（依据 Agent 内部执行流程）。submit_research_report 归入报告阶段。 */
 function phaseForEvent(event: ResearchEvent): PhaseKey | null {
   const type = event.type;
@@ -114,6 +123,9 @@ const PHASE_INDEX: Record<PhaseKey, number> = { plan: 0, research: 1, report: 2 
  * - 首次遇到某阶段事件 → 该阶段 active（记录 startedAt）并结束前一个阶段（冻结 elapsedMs）。
  * - 遇到 run 终态事件 → 所有 active 阶段冻结为 done，并冻结总计时。
  * 返回拷贝后的新 phases 与总计时状态。
+ *
+ * 时钟基准：`ts` 是「当前事件」的 occurred_at 时间戳（epoch ms，由调用方经 evTs 传入）。
+ * 每个事件用各自的时间戳推进，避免 hydrate 批量灌入共用同一 now 导致前一阶段 elapsed 被清零（#34）。
  */
 function advancePhases(
   phases: Phase[],
@@ -122,7 +134,7 @@ function advancePhases(
   runFinished: boolean,
   key: PhaseKey | null,
   isTerminal: boolean,
-  now: number,
+  ts: number,
 ): { phases: Phase[]; totalStartedAt: number | null; totalElapsedMs: number; runFinished: boolean } {
   if (isTerminal && runFinished) {
     // 终态已冻结过，保持幂等。
@@ -134,13 +146,13 @@ function advancePhases(
   let newFinished = runFinished;
 
   if (key && !newFinished) {
-    if (newTotal == null) newTotal = now;
+    if (newTotal == null) newTotal = ts;
     const idx = PHASE_INDEX[key];
     // 结束 idx 之前所有尚未 done 的阶段。
     for (let i = 0; i < idx; i += 1) {
       if (next[i].status === "active") {
         next[i].status = "done";
-        next[i].elapsedMs = Math.max(0, now - next[i].startedAt);
+        next[i].elapsedMs = Math.max(0, ts - next[i].startedAt);
       } else if (next[i].status === "pending") {
         // 跳过前序阶段事件直接进入更后阶段（如直接 report.ready）：标记为跳过/未发生。
         next[i].status = "done";
@@ -149,7 +161,7 @@ function advancePhases(
     }
     if (next[idx].status === "pending") {
       next[idx].status = "active";
-      next[idx].startedAt = now;
+      next[idx].startedAt = ts;
     }
   }
 
@@ -158,11 +170,11 @@ function advancePhases(
     for (const p of next) {
       if (p.status === "active") {
         p.status = "done";
-        p.elapsedMs = Math.max(0, now - p.startedAt);
+        p.elapsedMs = Math.max(0, ts - p.startedAt);
       }
     }
     if (newTotal != null) {
-      newElapsed = Math.max(0, now - newTotal);
+      newElapsed = Math.max(0, ts - newTotal);
     }
   }
 
@@ -196,8 +208,9 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
       let reportDegraded = state.reportDegraded;
       let reportReason = state.reportReason;
 
-      // 阶段推进：统一取本批事件的时钟起点，只针对「新事件」推进（避免已 seen 重复事件扰动）。
-      const now = performance.now();
+      // 阶段推进：以每个事件自身 occurred_at 为时钟起点，只针对「新事件」推进
+      // （避免已 seen 重复事件扰动）。不用共享 performance.now()——hydrate 批量灌入时
+      // 共用同一 now 会让前一阶段 elapsed 被清零（#34）。
       let { phases, totalStartedAt, totalElapsedMs, runFinished } = state;
 
       // 处理本批全部有效事件（合并去重在上方循环完成；阶段推进对重复事件幂等）。
@@ -252,6 +265,7 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
           reportReason = String(event.payload.reason);
         }
 
+        const ts = evTs(event);
         const advanced = advancePhases(
           phases,
           totalStartedAt,
@@ -259,7 +273,7 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
           runFinished,
           phaseForEvent(event),
           TERMINAL_TYPES.has(event.type),
-          now,
+          ts,
         );
         phases = advanced.phases;
         totalStartedAt = advanced.totalStartedAt;

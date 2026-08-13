@@ -171,7 +171,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 events=events_repo,
                 evidence=evidence_repo,
                 publisher=publisher,
-                session_service=SessionService(sessions_repo, paths),
+                session_service=SessionService(
+                    sessions_repo,
+                    paths,
+                    runs=runs_repo,
+                    artifacts=artifacts_repo,
+                    events=events_repo,
+                    evidence=evidence_repo,
+                ),
                 upload_service=UploadService(
                     sessions=sessions_repo,
                     artifacts=artifacts_repo,

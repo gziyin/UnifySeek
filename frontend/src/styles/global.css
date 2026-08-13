@@ -1327,6 +1327,8 @@ code,
   font-weight: 600;
   font-size: 0.9rem;
   color: var(--ink);
+  max-width: 100%;
+  word-break: break-word;
   overflow-wrap: anywhere;
 }
 .drawer-session-time {
@@ -1340,6 +1342,7 @@ code,
 }
 .drawer-run {
   width: 100%;
+  min-width: 0;
   text-align: left;
   padding: 0.5rem 0.6rem;
   border-radius: 8px;
@@ -1355,9 +1358,9 @@ code,
 .drawer-run-question {
   color: var(--ink);
   font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .drawer-run-meta {
   display: flex;
@@ -1376,6 +1379,40 @@ code,
 .drawer-status {
   font-size: 0.82rem;
   color: var(--mist);
+}
+.drawer-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.drawer-newchat {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(30, 90, 122, 0.12);
+  color: var(--steel);
+  font-size: 0.8rem;
+  border: 1px solid transparent;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.drawer-newchat:hover {
+  background: rgba(30, 90, 122, 0.22);
+  border-color: var(--light-blue);
+}
+
+/* ============ 完成引导横幅 ============ */
+.completed-tip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-sm);
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  color: var(--ink);
+  font-size: 0.9rem;
 }
 
 /* ============ 错误文本 ============ */

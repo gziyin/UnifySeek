@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -8,7 +9,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from ai_dev_researcher.core.config import Settings
-from ai_dev_researcher.domain.runs import ResearchRequest
+from ai_dev_researcher.domain.runs import ResearchRequest, Run, RunStatus
 from ai_dev_researcher.domain.sessions import (
     Session,
     make_slug,
@@ -170,11 +171,21 @@ async def test_repository_legacy_row_display_name_none(tmp_path: Path):
     conn = await connect(str(tmp_path / "app.db"))
     await init_db(conn)
     # 直接按旧 schema 插入一行（display_name 列不存在）
+    session_id = uuid4()
     await conn.execute(
         "INSERT INTO sessions (session_id, status, created_at, updated_at) VALUES (?, 'active', ?, ?)",
-        (str(uuid4()), "2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00"),
+        (str(session_id), "2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00"),
     )
     await conn.commit()
+    # A2：list() 只返回有 run 的会话，故为该存量会话补一条 run 以便被列出。
+    await RunRepository(conn).create(
+        Run(
+            session_id=session_id,
+            status=RunStatus.SUCCEEDED,
+            request=ResearchRequest(question="legacy session question"),
+            created_at=datetime.now(timezone.utc),
+        )
+    )
 
     repo = SessionRepository(conn)
     items = await repo.list()
@@ -201,8 +212,19 @@ async def test_repository_list_sessions(tmp_path: Path):
     conn = await connect(str(tmp_path / "app.db"))
     await init_db(conn)
     repo = SessionRepository(conn)
-    await repo.create(Session(display_name="first"))
-    await repo.create(Session(display_name="second"))
+    runs = RunRepository(conn)
+    first = await repo.create(Session(display_name="first"))
+    second = await repo.create(Session(display_name="second"))
+    # A2：list() 只返回有 run 的会话，故为两者各补一条 run。
+    for s in (first, second):
+        await runs.create(
+            Run(
+                session_id=s.session_id,
+                status=RunStatus.SUCCEEDED,
+                request=ResearchRequest(question="q"),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
 
     items = await repo.list()
     assert len(items) == 2
@@ -224,7 +246,21 @@ async def test_service_create_and_list(tmp_path: Path):
 
     session = await service.create_session()
     assert session.display_name is None
-    assert len(await service.list_sessions()) == 1
+    # 空会话（无 run）被 list() 过滤（A2）
+    assert len(await service.list_sessions()) == 0
+
+    # 有 run 的会话才出现在列表
+    await RunRepository(conn).create(
+        Run(
+            session_id=session.session_id,
+            status=RunStatus.SUCCEEDED,
+            request=ResearchRequest(question="q"),
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    listed = await service.list_sessions()
+    assert len(listed) == 1
+    assert listed[0].session_id == session.session_id
     await conn.close()
 
 
@@ -280,11 +316,11 @@ async def test_api_list_sessions(client: AsyncClient):
     assert first.status_code == 201
     assert second.status_code == 201
 
+    # A2：空会话（无 run）在历史列表中被过滤，列表为空
     resp = await client.get("/api/sessions")
     assert resp.status_code == 200
     items = resp.json()
-    assert len(items) == 2
-    assert all("display_name" in item for item in items)
+    assert len(items) == 0
 
 
 @pytest.mark.asyncio

@@ -66,8 +66,15 @@ class SessionRepository:
 
     async def list(self) -> list[Session]:
         await self._ensure_display_name_column()
+        # 只返回有 run 的会话（过滤 display_name=None 无 run 空会话，解决 #32「无效记录」），
+        # 并按最近活动（updated_at）倒序，历史记录「最近在前」（#30）。
         cursor = await self._conn.execute(
-            "SELECT * FROM sessions ORDER BY created_at ASC"
+            """
+            SELECT DISTINCT s.*
+            FROM sessions s
+            JOIN runs r ON r.session_id = s.session_id
+            ORDER BY s.updated_at DESC
+            """
         )
         rows = await cursor.fetchall()
         return [self._row_to_session(row) for row in rows]
@@ -90,6 +97,20 @@ class SessionRepository:
             (utc_now().isoformat(), str(session_id)),
         )
         await self._conn.commit()
+
+    async def delete(self, session_id: UUID) -> bool:
+        """Delete a session row. Returns True if a row was removed.
+
+        Caller is responsible for deleting dependent rows (runs/artifacts/
+        events/evidence) first, since ``PRAGMA foreign_keys = ON`` with no
+        ``ON DELETE CASCADE`` on ``runs.session_id`` / ``artifacts.session_id``.
+        """
+        cursor = await self._conn.execute(
+            "DELETE FROM sessions WHERE session_id = ?",
+            (str(session_id),),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
 
     @staticmethod
     def _row_to_session(row: aiosqlite.Row) -> Session:

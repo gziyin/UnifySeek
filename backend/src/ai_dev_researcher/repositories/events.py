@@ -96,6 +96,15 @@ class EventRepository:
             payload=json.loads(row["payload_json"]),
         )
 
+    async def delete_by_session(self, session_id: UUID) -> int:
+        """Delete all events of a session. Returns the number of rows removed."""
+        cursor = await self._conn.execute(
+            "DELETE FROM events WHERE session_id = ?",
+            (str(session_id),),
+        )
+        await self._conn.commit()
+        return cursor.rowcount
+
     async def list_after(self, run_id: UUID, after_seq: int) -> list[ResearchEvent]:
         cursor = await self._conn.execute(
             """

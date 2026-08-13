@@ -129,6 +129,19 @@ export async function listSessions(): Promise<SessionListItem[]> {
   return parseJson(response, SessionListItemSchema.array());
 }
 
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`/api/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new ApiError(
+      typeof data?.code === "string" ? data.code : "HTTP_ERROR",
+      typeof data?.message === "string" ? data.message : "failed to delete session",
+    );
+  }
+}
+
 export async function listRunsForSession(sessionId: string): Promise<Run[]> {
   const response = await fetch(`/api/sessions/${sessionId}/runs`);
   return parseJson(response, RunListResponseSchema);
