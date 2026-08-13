@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     agent_max_elapsed_seconds: float = 600.0
     kb_prefetch_top_k: int = 5
     kb_prefetch_enabled: bool = True
+    # KB 预取相关性阈值：低于该分数的 chunk 视为与问题无关，不记录证据、
+    # 不发布 source.discovered/evidence.recorded（不污染来源账本）。可由 .env 覆盖。
+    kb_prefetch_score_threshold: float = 0.3
 
     # Phase-1 vertical slice uses a fake executor until DeepAgents is wired.
     fake_agent_mode: bool = True

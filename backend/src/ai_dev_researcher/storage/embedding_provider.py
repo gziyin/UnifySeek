@@ -75,13 +75,36 @@ class SentenceTransformersProvider(EmbeddingProvider):
         return bool(os.environ.get("HF_HUB_OFFLINE"))
 
     def _model_cache_dir_exists(self, cache_dir: str | None, model_name: str) -> bool:
-        """Return True when a populated HF snapshot dir exists under cache_dir."""
+        """Return True when a populated HF snapshot dir exists under cache_dir.
+
+        Robust to org-prefix mismatch between the requested ``model_name`` and
+        the on-disk cache dir name (e.g. asking for bare ``all-MiniLM-L6-v2``
+        while disk holds ``models--sentence-transformers--all-MiniLM-L6-v2``, or
+        vice versa): besides the exact ``models--<normalized>`` candidate, we
+        also match any ``models--*--<basename>`` / ``models--<basename>`` dir
+        under the cache root. This ensures ``has_local_cache=True`` and the
+        offline path (HF_HUB_OFFLINE=1) is taken instead of an online HF fetch.
+        """
         if not cache_dir:
             return False
         base = Path(cache_dir)
         for dirname in _model_cache_dir_names(model_name):
             if (base / dirname).is_dir():
                 return True
+        # Reverse mapping: bare name -> org-qualified dir, or any org variant.
+        basename = model_name.rsplit("/", 1)[-1]
+        if (base / f"models--{basename}").is_dir():
+            return True
+        if base.is_dir():
+            try:
+                for child in base.iterdir():
+                    if child.name.startswith("models--") and child.is_dir():
+                        if child.name == f"models--{basename}":
+                            return True
+                        if child.name.endswith(f"--{basename}"):
+                            return True
+            except OSError:  # 缓存根不可读时按不存在处理（走在线/报错路径）
+                return False
         return False
 
     def _ensure_model(self):

@@ -540,15 +540,33 @@ class AgentResearchExecutor:
         """Deterministically inject KB context + K evidence before model delegation."""
         if not self._settings.kb_prefetch_enabled or self._knowledge_index is None:
             return
-        result = await search_knowledge_base_impl(
-            query=context.question,
-            knowledge_index=self._knowledge_index,
-            top_k=self._settings.kb_prefetch_top_k,
-        )
+        # 超时保护：embedding 加载/检索慢或失败时（如离线缓存缺失走在线 HF 路径会
+        # 5 次指数退避重试、拖垮 run 启动），超时即跳过 prefetch，不阻塞研究进行。
+        try:
+            result = await asyncio.wait_for(
+                search_knowledge_base_impl(
+                    query=context.question,
+                    knowledge_index=self._knowledge_index,
+                    top_k=self._settings.kb_prefetch_top_k,
+                    score_threshold=self._settings.kb_prefetch_score_threshold,
+                ),
+                timeout=15,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "KB prefetch timed out after 15s for run %s; skipping prefetch",
+                context.run_id,
+            )
+            return
+        # 双保险：#13/#18——检索层已按 score_threshold 过滤，这里再按 score 二次过滤，
+        # 低于阈值的 chunk 视为与问题无关，不记录证据、不发布账本事件。
+        score_threshold = self._settings.kb_prefetch_score_threshold
         lines: list[str] = []
         for rank, item in enumerate(result.get("results") or [], start=1):
             path = item.get("file_path") or ""
             if not path:
+                continue
+            if (item.get("score") or 0.0) < score_threshold:
                 continue
             excerpt = (item.get("text") or "")[:2000]
             title = item.get("symbol") or path

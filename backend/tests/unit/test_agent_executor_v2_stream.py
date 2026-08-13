@@ -468,6 +468,143 @@ async def test_executor_kb_prefetch_injects_context_and_evidence(env, tmp_path):
     assert "evidence.recorded" in types
 
 
+@pytest.mark.asyncio
+async def test_executor_kb_prefetch_filters_low_score_chunks(env, tmp_path):
+    """#13/#18：低于 kb_prefetch_score_threshold 的 KB chunk 不记录证据、不发布账本事件。"""
+    settings, conn, session, run, publisher, executor = env
+    kb_root = tmp_path / "kb"
+    kb_root.mkdir(parents=True)
+    (kb_root / "low.md").write_text("# Low\n\nIrrelevant content.\n", encoding="utf-8")
+    (kb_root / "high.md").write_text("# High\n\nRelevant content.\n", encoding="utf-8")
+    settings.knowledge_base_root = kb_root
+    # 默认阈值 0.3：low score=0.1（无关，应被过滤），high score=0.9（相关，应保留）。
+    fake_index = _FakeKnowledgeIndex(
+        [
+            {
+                "file_path": "low.md",
+                "symbol": "low",
+                "parent_symbol": "",
+                "kind": "doc",
+                "line_start": 1,
+                "line_end": 2,
+                "score": 0.1,
+                "text": "Irrelevant content.",
+            },
+            {
+                "file_path": "high.md",
+                "symbol": "high",
+                "parent_symbol": "",
+                "kind": "doc",
+                "line_start": 1,
+                "line_end": 2,
+                "score": 0.9,
+                "text": "Relevant content.",
+            },
+        ]
+    )
+    executor._knowledge_index = fake_index
+    captured = {}
+    events = [
+        _tool_start("search_web", "r1", {"query": "DeepAgents"}),
+        _tool_end("search_web", "r1", {"items": [{"evidence_id": "S1", "title": "DeepAgents", "url": "https://x"}]}),
+        _tool_start("submit_research_report", "r2", {"title": "t"}),
+        _tool_end("submit_research_report", "r2", {"artifact_id": ARTIFACT_ID, "title": "t"}),
+    ]
+    stub = _StubAgent(events)
+
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None):
+        captured["context"] = context
+        return stub
+
+    with patch(
+        "ai_dev_researcher.services.agent_executor.create_research_agent",
+        side_effect=_fake_create,
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+
+    # 1) 预取上下文：只注入高分 chunk，低分 chunk 不进入 knowledge_context。
+    ctx = captured["context"].knowledge_context
+    assert "high.md" in ctx
+    assert "low.md" not in ctx
+
+    # 2) 账本：只有高分 chunk 记录为 knowledge_base 证据，低分 chunk 不入账本。
+    store = EvidenceStore(
+        run_id=run.run_id,
+        session_id=run.session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=paths_for_test(settings),
+    )
+    ledger = await store.list_for_run()
+    kb_locs = [item.locator for item in ledger if item.source_type == "knowledge_base"]
+    assert any("high.md" in loc for loc in kb_locs)
+    assert not any("low.md" in loc for loc in kb_locs)
+
+    # 3) 账本事件：仅高分 chunk 发布 source.discovered，低分 chunk 不发布。
+    kb_discovered_paths = [
+        str(e.payload.get("path", ""))
+        for e in await EventRepository(conn).list_after(run.run_id, 0)
+        if e.type == "source.discovered"
+        and e.payload.get("source_type") == "knowledge_base"
+    ]
+    assert kb_discovered_paths  # 至少发布了一条（high.md）
+    assert all("high.md" in p for p in kb_discovered_paths)
+    assert not any("low.md" in p for p in kb_discovered_paths)
+
+
+@pytest.mark.asyncio
+async def test_executor_kb_prefetch_timeout_skips_without_blocking(env):
+    """prefetch 超时保护：search_knowledge_base_impl 挂起/超时时，_prefetch_knowledge
+    快速返回、不记录证据、不发布账本事件、不阻塞 run 启动。"""
+    settings, conn, session, run, publisher, executor = env
+    executor._knowledge_index = object()  # 满足非 None，走检索路径
+    store = EvidenceStore(
+        run_id=run.run_id,
+        session_id=run.session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=paths_for_test(settings),
+    )
+    context = RunContext(
+        run_id=run.run_id,
+        session_id=run.session_id,
+        question=run.request.question,
+        uploaded_artifact_ids=run.request.uploaded_artifact_ids,
+        max_web_sources=run.request.max_web_sources,
+        constraints=run.request.constraints,
+        focus_areas=run.request.focus_areas,
+        paths=paths_for_test(settings),
+        settings=settings,
+        max_tool_calls=10,
+        max_elapsed_seconds=100,
+    )
+
+    async def _hanging_search(**kwargs):
+        raise asyncio.TimeoutError
+
+    with patch(
+        "ai_dev_researcher.services.agent_executor.search_knowledge_base_impl",
+        side_effect=_hanging_search,
+    ):
+        await executor._prefetch_knowledge(context, store)
+
+    # 不抛异常、正常返回（run 可继续）。
+    # 不记录任何 knowledge_base 证据。
+    ledger = await store.list_for_run()
+    assert not any(item.source_type == "knowledge_base" for item in ledger)
+    # 不发布 source.discovered / evidence.recorded 账本事件。
+    events = await EventRepository(conn).list_after(run.run_id, 0)
+    assert not any(
+        e.type in {"source.discovered", "evidence.recorded"}
+        and e.payload.get("source_type") == "knowledge_base"
+        for e in events
+    )
+    # 预取上下文置空。
+    assert context.knowledge_context == ""
+
+
 def paths_for_test(settings: Settings) -> WorkspacePaths:
     return WorkspacePaths(settings.sessions_root)
 @pytest.mark.asyncio
