@@ -2,6 +2,45 @@ import { useEffect, useRef, useState } from "react";
 import { deleteSession, listRunsForSession, listSessions } from "../api/client";
 import type { Run, SessionListItem } from "../domain/schemas";
 
+function statusClass(status: string): string {
+  switch (status) {
+    case "succeeded":
+      return "success";
+    case "failed":
+      return "danger";
+    case "cancelled":
+    case "interrupted":
+    case "cancelling":
+      return "warn";
+    default:
+      return "";
+  }
+}
+
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) {
+    return "";
+  }
+  const diff = Date.now() - then;
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) {
+    return "刚刚";
+  }
+  if (diff < hour) {
+    return `${Math.floor(diff / minute)} 分钟前`;
+  }
+  if (diff < day) {
+    return `${Math.floor(diff / hour)} 小时前`;
+  }
+  if (diff < 7 * day) {
+    return `${Math.floor(diff / day)} 天前`;
+  }
+  return new Date(then).toLocaleDateString();
+}
+
 type Props = {
   open: boolean;
   onClose: () => void;
@@ -18,7 +57,6 @@ export function HistoryDrawer({ open, onClose, onRestore, onDeleteSession, onNew
   const [loadError, setLoadError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [runsBySession, setRunsBySession] = useState<Record<string, Run[]>>({});
-  const [runsLoading, setRunsLoading] = useState(false);
 
   // 打开时加载会话列表，并聚焦抽屉
   useEffect(() => {
@@ -50,7 +88,6 @@ export function HistoryDrawer({ open, onClose, onRestore, onDeleteSession, onNew
       return;
     }
     let cancelled = false;
-    setRunsLoading(true);
     void listRunsForSession(expandedId)
       .then((runs) => {
         if (!cancelled) {
@@ -61,9 +98,6 @@ export function HistoryDrawer({ open, onClose, onRestore, onDeleteSession, onNew
         if (!cancelled) {
           setRunsBySession((prev) => ({ ...prev, [expandedId]: [] }));
         }
-      })
-      .finally(() => {
-        if (!cancelled) setRunsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -163,45 +197,66 @@ export function HistoryDrawer({ open, onClose, onRestore, onDeleteSession, onNew
                 title="右键删除该会话"
               >
                 <div className="drawer-session-head">
-                  <span className="drawer-session-name">
-                    {session.display_name || session.session_id}
-                  </span>
-                  <span className="drawer-session-time mono">
-                    {new Date(session.created_at).toLocaleDateString()}
-                  </span>
+                  <button
+                    type="button"
+                    className="drawer-session-toggle"
+                    onClick={() => setExpandedId(expanded ? null : session.session_id)}
+                    aria-expanded={expanded}
+                  >
+                    <span className="drawer-session-icon" aria-hidden="true">
+                      {(session.display_name || session.session_id).charAt(0).toUpperCase()}
+                    </span>
+                    <span className="drawer-session-main">
+                      <span className="drawer-session-name">
+                        {session.display_name || session.session_id}
+                      </span>
+                      <span className="drawer-session-time mono">
+                        {formatRelativeTime(session.updated_at)}
+                      </span>
+                    </span>
+                    <span className={`drawer-chevron${expanded ? " open" : ""}`} aria-hidden="true">
+                      ▸
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="drawer-session-delete"
+                    onClick={() => void handleDeleteSession(session)}
+                    aria-label="删除该会话"
+                    title="删除该会话"
+                  >
+                    🗑
+                  </button>
                 </div>
-                <div className="drawer-run-list">
-                  {expanded && runsLoading ? (
-                    <p className="drawer-status">加载中…</p>
-                  ) : null}
-                  {(runs ?? []).map((run) => (
-                    <button
-                      key={run.run_id}
-                      type="button"
-                      className="drawer-run"
-                      onClick={() => onRestore({ sessionId: session.session_id, run })}
-                    >
-                      <div className="drawer-run-question">{run.question}</div>
-                      <div className="drawer-run-meta">
-                        <span className="mono">{run.status}</span>
-                        <span>{new Date(run.created_at).toLocaleString()}</span>
-                      </div>
-                    </button>
-                  ))}
-                  {!expanded && runs === undefined ? (
-                    <button
-                      type="button"
-                      className="drawer-run"
-                      onClick={() => setExpandedId(session.session_id)}
-                      aria-expanded={false}
-                    >
-                      <div className="drawer-run-meta">
-                        <span>查看该会话的运行记录</span>
-                        <span aria-hidden="true">▸</span>
-                      </div>
-                    </button>
-                  ) : null}
-                </div>
+                {expanded ? (
+                  <div className="drawer-run-list">
+                    {runs === undefined ? (
+                      <p className="drawer-status">加载中…</p>
+                    ) : runs.length === 0 ? (
+                      <p className="drawer-empty">暂无运行记录</p>
+                    ) : (
+                      runs.map((run) => (
+                        <button
+                          key={run.run_id}
+                          type="button"
+                          className="drawer-run"
+                          onClick={() => onRestore({ sessionId: session.session_id, run })}
+                        >
+                          <div className="drawer-run-question">{run.question}</div>
+                          <div className="drawer-run-meta">
+                            <span className={`status-pill ${statusClass(run.status)}`}>
+                              <span className="status-dot" aria-hidden="true" />
+                              {run.status}
+                            </span>
+                            <span className="drawer-run-time">
+                              {new Date(run.created_at).toLocaleString()}
+                            </span>
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                ) : null}
               </div>
             );
           })}

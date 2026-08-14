@@ -38,6 +38,22 @@ REM    NOT the /D dir. So use the absolute python path here.
 echo [start] Backend : http://127.0.0.1:%APP_PORT%
 start "ai-dev-researcher-backend" /D "%~dp0backend" "%~dp0backend\.venv\Scripts\python.exe" -m ai_dev_researcher.main
 
+REM 4b. Wait for the backend to become ready (avoid vite proxy ECONNREFUSED).
+REM    Poll /api/health so start.bat never reports done while the API is down.
+echo [wait] Waiting for Backend on http://127.0.0.1:%APP_PORT%/api/health ...
+for /l %%i in (1,1,30) do (
+    curl.exe -fsS --max-time 1 http://127.0.0.1:%APP_PORT%/api/health >nul 2>nul
+    if not errorlevel 1 goto backend_ready
+    ping -n 2 127.0.0.1 >nul
+)
+echo [error] Backend did not become ready on http://127.0.0.1:%APP_PORT%
+echo [error] Check the ai-dev-researcher-backend window for startup output.
+pause
+exit /b 1
+
+:backend_ready
+echo [ok] Backend ready: http://127.0.0.1:%APP_PORT%
+
 REM 5. Check frontend tooling.
 where node.exe >nul 2>nul
 if errorlevel 1 (
