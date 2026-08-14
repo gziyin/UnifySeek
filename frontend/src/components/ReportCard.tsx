@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { artifactDownloadUrl } from "../api/client";
@@ -6,7 +6,6 @@ import type {
   ResearchClaim,
   ResearchReport,
 } from "../domain/schemas";
-
 type Props = {
   markdown?: string;
   artifactId?: string;
@@ -125,6 +124,17 @@ export function ReportCard({
     window.setTimeout(() => setCopied(false), 1200);
   };
 
+  // 章节末尾灰斜体来源行：*来源：[n][n]...* → 加 report-source 类
+  const markdownComponents = {
+    em: ({ children }: { children?: ReactNode }) => {
+      const text = Array.isArray(children) ? children.join("") : String(children ?? "");
+      if (text.startsWith("来源：")) {
+        return <em className="report-source">{children}</em>;
+      }
+      return <em>{children}</em>;
+    },
+  };
+
   return (
     <section className="glass-card report-card">
       <div className="report-expand">
@@ -169,7 +179,7 @@ export function ReportCard({
             {hasJson && view === "structured" && reportJson ? (
               <StructuredReport report={reportJson} />
             ) : markdown ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents}>
                 {markdown}
               </ReactMarkdown>
             ) : (

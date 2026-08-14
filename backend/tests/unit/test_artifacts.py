@@ -73,7 +73,7 @@ def test_render_contains_all_sections():
     )
     for fragment in [
         "# DeepAgents 对比调研",
-        "## 执行摘要",
+        "## 核心结论",
         "## 一、架构对比",
         "### 1.1 编排差异",
         "## 行动建议",
@@ -86,10 +86,19 @@ def test_render_numbered_citations_and_sources():
     report = _nested_report()
     md = render_report_markdown(report, collect_claims(report), _evidence_map())
     # 编号顺序：C1[S1]=1, C2[S2,S3]=2/3, table[S3](dup), C3[S4]=4, CR[S1](dup)
-    assert "statement C1[1]" in md
-    assert "statement C2[2][3]" in md
-    assert "statement C3[4]" in md
-    assert "statement CR[1]" in md
+    # 句尾不再内联 [n]，改为章节末尾聚合来源行
+    assert "statement C1" in md
+    assert "statement C2" in md
+    assert "statement C3" in md
+    assert "statement CR" in md
+    assert "statement C1[1]" not in md
+    assert "statement C2[2][3]" not in md
+    # 核心结论聚合：C1[S1]
+    assert "*来源：[1]*" in md
+    # 章节聚合（含 table 与子节，章节内首次出现顺序）：S1,S2,S3,S4
+    assert "*来源：[1][2][3][4]*" in md
+    # 行动建议聚合：CR[S1]
+    assert md.count("*来源：[1]*") >= 1
     # Sources 按编号列出，doc 证据回退 locator
     assert "- [1] https://example.com/1" in md
     assert "- [2] lines 1-3" in md
@@ -116,8 +125,42 @@ def test_render_table_as_markdown_rows():
     md = render_report_markdown(_nested_report(), collect_claims(_nested_report()))
     assert "| 维度 | DeepAgents | LangGraph |" in md
     assert "| 编排 | 主从 | 图 |" in md
-    # 表格级引用也在正文以 [n] 呈现
-    assert "*来源：[3]*" in md
+    # 表格级引用不再内联，并入章节末尾聚合来源行
+    assert "statement C1" in md
+    assert "*来源：[1][2][3][4]*" in md
+
+
+def test_render_aggregated_sources_order():
+    """聚合行按章节内首次出现顺序（非全局编号升序）：C2[S2,S3] 先于子节 C3[S4]。"""
+    report = _nested_report()
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    # 章节一、架构对比 引用顺序：C1[S1] → C2[S2,S3] → table[S3](dup) → 子节 C3[S4]
+    assert "*来源：[1][2][3][4]*" in md
+
+
+def test_render_summary_truncated_when_long():
+    """核心结论超长时截断并补省略号，不产生未闭合 ** 标记。"""
+    report = ResearchReport(
+        title="t",
+        executive_summary_claim_ids=["LONG"],
+        sections=[
+            ReportSection(
+                heading="H",
+                claims=[_claim("LONG", ["S1"], "medium")],
+            )
+        ],
+        recommendations=[_claim("CR", ["S1"], "medium")],
+    )
+    long_statement = "这是一段**非常长的核心结论**" + "内容" * 60
+    report.sections[0].claims[0].statement = long_statement
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    assert "## 核心结论" in md
+    assert "…" in md
+    # 正文 section 仍保留完整 statement（含粗体）；仅核心结论需截断
+    assert long_statement in md
+    # 核心结论段落（截断后）不得残留未闭合 **
+    core_block = md.split("## 核心结论", 1)[1].split("## ", 1)[0]
+    assert "**" not in core_block
 
 
 def test_collect_claims_recurses_into_subsections():
