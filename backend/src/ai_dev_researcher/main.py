@@ -107,10 +107,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             evidence_repo = EvidenceRepository(conn)
             publisher = EventPublisher(events_repo, queue_size=settings.ws_send_queue_size)
 
+            stale_runs = await runs_repo.list_active_runs()
             interrupted = await runs_repo.mark_stale_interrupted()
-            if interrupted:
-                # No publisher fanout needed for historical interrupted runs on boot.
-                pass
+            for run in stale_runs:
+                # 启动时被打断的 run 必须补写终态事件：前端靠终态事件冻结计时器，
+                # 否则这些历史 run 会在时间线里永远显示「运行中」（#40 残留）。
+                await publisher.publish(
+                    session_id=run.session_id,
+                    run_id=run.run_id,
+                    event_type="run.failed",
+                    payload={
+                        "code": "SERVER_RESTART",
+                        "message": "Run interrupted by server restart",
+                        "retryable": False,
+                    },
+                )
 
             provider = None
             try:
