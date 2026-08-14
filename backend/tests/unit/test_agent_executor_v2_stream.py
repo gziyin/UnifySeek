@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -21,6 +22,7 @@ from ai_dev_researcher.services.event_publisher import EventPublisher
 from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.storage.knowledge_index import KbChunk
 from ai_dev_researcher.storage.paths import WorkspacePaths
+from ai_dev_researcher.tools.knowledge_base import search_knowledge_base_impl
 
 
 def _tool_start(name: str, run_id: str, input_: dict) -> dict:
@@ -173,6 +175,53 @@ async def test_executor_v2_stream_no_submit_fails(env):
     types = await _event_types(conn, run.run_id)
     assert "report.ready" in types
     assert "run.failed" in types
+
+
+class _HangingStreamAgent:
+    """astream_events 永不产出事件（模拟模型/工具调用挂起，且无事件触发预算检查）。
+
+    必须是真正的 async generator（含 yield），否则 astream_events 返回协程，
+    executor 会先 ``await`` 它而直接挂死，测不到 idle timeout。
+    """
+
+    def astream_events(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        async def _gen():
+            if False:
+                yield  # 使函数成为 async generator（永不真正产出事件）
+            await asyncio.sleep(3600)
+
+        return _gen()
+
+
+class _SlowStreamAgent:
+    """按批返回事件，批次间可人为 sleep（用于触发阶段预算/空闲超时）。"""
+
+    def __init__(self, batches: list[list[dict]], gap: float = 0.0):
+        self._batches = batches
+        self._gap = gap
+        self._calls = 0
+
+    def astream_events(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self._calls += 1
+        events = self._batches[min(self._calls, len(self._batches)) - 1] if self._batches else []
+
+        async def _gen():
+            for ev in events:
+                yield ev
+                if self._gap:
+                    await asyncio.sleep(self._gap)
+
+        return _gen()
+
+
+class _SlowSyncKnowledgeIndex:
+    """retrieve 同步阻塞 0.5s（模拟 embed/chroma 卡住）——检验 to_thread offload 与 wait_for 可打断。"""
+
+    is_ready = True
+
+    def retrieve(self, query, path=None, top_k: int = 10, score_threshold: float = 0.0):  # noqa: ANN001, ANN002, ANN003
+        time.sleep(0.5)
+        return []
 
 
 class _SequenceStubAgent:
@@ -613,7 +662,7 @@ async def test_executor_budget_reason_elapsed(env):
     settings, conn, session, run, publisher, executor = env
     context = RunContext(
         run_id=run.run_id,
-        session_id=run.session_id,
+        session_id=session.session_id,
         question=run.request.question,
         uploaded_artifact_ids=[],
         max_web_sources=5,
@@ -623,3 +672,113 @@ async def test_executor_budget_reason_elapsed(env):
         max_elapsed_seconds=1.0,
     )
     assert executor._budget_reason(0, 2.0, context) == "budget_exceeded: max_elapsed_seconds"
+
+
+@pytest.mark.asyncio
+async def test_executor_idle_timeout_writes_degraded_report(env):
+    """#40：事件流卡死（无事件）时，空闲超时触发收敛为 FAILED/BUDGET_EXCEEDED + DEGRADED 报告。"""
+    settings, conn, session, run, publisher, executor = env
+    executor._settings.agent_max_elapsed_seconds = 0
+    executor._settings.agent_plan_timeout_seconds = 0
+    executor._settings.agent_research_timeout_seconds = 0
+    executor._settings.agent_report_timeout_seconds = 0
+    executor._settings.agent_idle_timeout_seconds = 0.05
+    stub = _HangingStreamAgent()
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "BUDGET_EXCEEDED"
+    assert "idle_timeout" in updated.error_message
+    assert updated.finished_at is not None
+    assert updated.report_artifact_id is not None
+
+
+@pytest.mark.asyncio
+async def test_executor_stage_budget_research_timeout_writes_degraded(env):
+    """阶段级看门狗：research 阶段超时（而非总预算）触发收敛。"""
+    settings, conn, session, run, publisher, executor = env
+    executor._settings.agent_max_elapsed_seconds = 0
+    executor._settings.agent_plan_timeout_seconds = 0
+    executor._settings.agent_research_timeout_seconds = 0.1
+    executor._settings.agent_report_timeout_seconds = 0
+    executor._settings.agent_idle_timeout_seconds = 0  # 不启用空闲超时
+    # 同一 attempt 内：r1 使 plan→research，间隔 0.15s 后 r2 触发 research 阶段预算。
+    batches = [
+        [
+            _tool_start("search_web", "r1", {"query": "DeepAgents"}),
+            _tool_start("search_web", "r2", {"query": "LangGraph"}),
+        ],
+    ]
+    stub = _SlowStreamAgent(batches, gap=0.15)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "BUDGET_EXCEEDED"
+    assert "stage_timeout:research" in updated.error_message
+    assert updated.report_artifact_id is not None
+
+
+@pytest.mark.asyncio
+async def test_search_knowledge_base_impl_offloads_sync_retrieve():
+    """同步阻塞不可打断回归：index.retrieve 同步卡 0.5s 时，wait_for 仍能在 0.1s 触发超时。"""
+    started = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            search_knowledge_base_impl(query="q", knowledge_index=_SlowSyncKnowledgeIndex()),
+            timeout=0.1,
+        )
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.4  # 未被 0.5s 同步阻塞拖住（offload 前该断言失败且循环被冻结）
+
+
+@pytest.mark.asyncio
+async def test_prefetch_sync_blocking_offloaded_keeps_loop_responsive(env, tmp_path):
+    """#40：prefetch 的同步检索 offload 到线程后，事件循环不被冻结、超时能跳过、不阻塞 run 启动。"""
+    settings, conn, session, run, publisher, executor = env
+    executor._knowledge_index = _SlowSyncKnowledgeIndex()
+    executor._settings.kb_prefetch_timeout_seconds = 0.1
+    store = EvidenceStore(
+        run_id=run.run_id,
+        session_id=run.session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=paths_for_test(settings),
+    )
+    context = RunContext(
+        run_id=run.run_id,
+        session_id=run.session_id,
+        question=run.request.question,
+        uploaded_artifact_ids=[],
+        max_web_sources=5,
+        paths=paths_for_test(settings),
+        settings=settings,
+        max_tool_calls=10,
+        max_elapsed_seconds=100,
+    )
+
+    ticks = 0
+
+    async def _ticker() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    ticker_task = asyncio.create_task(_ticker())
+    started = time.monotonic()
+    await executor._prefetch_knowledge(context, store)
+    elapsed = time.monotonic() - started
+    ticker_task.cancel()
+
+    assert elapsed < 0.4  # 0.1s 超时即跳过，未被 0.5s 同步检索拖住
+    assert context.knowledge_context == ""
+    assert ticks >= 1  # 事件循环未被同步阻塞（ticker 一直在跑）
+    ledger = await store.list_for_run()
+    assert not any(item.source_type == "knowledge_base" for item in ledger)

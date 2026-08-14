@@ -44,8 +44,25 @@ class Settings(BaseSettings):
     # Agent D budget 护栏：0 表示不限制；可由 .env / 环境变量覆盖，也可在 run constraints 中传。
     agent_max_tool_calls: int = 60
     agent_max_elapsed_seconds: float = 600.0
+    # 阶段级看门狗（0 表示禁用该阶段预算）：单次 attempt 内 plan/research/report
+    # 各自最多耗时；总时长仍受 agent_max_elapsed_seconds 约束，避免误降级「慢但能成功」的 run。
+    agent_plan_timeout_seconds: float = 180.0
+    agent_research_timeout_seconds: float = 480.0
+    agent_report_timeout_seconds: float = 180.0
+    # 空闲超时：事件流内连续 idle_timeout 秒无事件（模型/工具调用卡住）视为挂起，
+    # 收敛为 DEGRADED。默认 300s 约等于单次模型调用最坏耗时（timeout=90 × max_retries=3）的上界。
+    agent_idle_timeout_seconds: float = 300.0
+    # TaskManager 硬超时 = 总预算 + grace（最后一道兜底，任务卡死时强制取消并收敛终态）。
+    # 0 表示不启用硬超时（总预算为 0 时跟随禁用）。
+    agent_hard_timeout_grace_seconds: float = 60.0
+    # 关闭时等待 run 后台任务收敛的超时（避免进程挂死）。
+    task_manager_shutdown_timeout_seconds: float = 15.0
+    # stale run 回收器运行周期（秒）：回收「task 已死但 run 仍 active」的行。
+    stale_reap_interval_seconds: float = 30.0
     kb_prefetch_top_k: int = 5
     kb_prefetch_enabled: bool = True
+    # KB 预取超时（秒）：embedding 加载/检索慢或失败时超时跳过，不阻塞 run 启动。
+    kb_prefetch_timeout_seconds: float = 15.0
     # KB 预取相关性阈值：低于该分数的 chunk 视为与问题无关，不记录证据、
     # 不发布 source.discovered/evidence.recorded（不污染来源账本）。可由 .env 覆盖。
     kb_prefetch_score_threshold: float = 0.3

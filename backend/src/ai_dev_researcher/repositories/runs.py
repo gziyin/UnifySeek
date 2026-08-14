@@ -92,6 +92,25 @@ class RunRepository:
             return None
         return self._row_to_run(row)
 
+    async def list_active_runs(self, limit: int = 100) -> list[Run]:
+        """All non-terminal runs (PENDING/RUNNING/CANCELLING), oldest first.
+
+        Used by the stale-run reaper to reclaim rows whose background task
+        died without converging to a terminal status (#40).
+        """
+        placeholders = ",".join("?" for _ in ACTIVE_RUN_STATUSES)
+        cursor = await self._conn.execute(
+            f"""
+            SELECT * FROM runs
+            WHERE status IN ({placeholders})
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (*[s.value for s in ACTIVE_RUN_STATUSES], limit),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_run(row) for row in rows]
+
     async def list_for_session(
         self, session_id: UUID, limit: int = 50, offset: int = 0
     ) -> list[Run]:

@@ -117,6 +117,9 @@ class KnowledgeIndex:
         self._collection = None
         self._ready = False
         self._lock = threading.Lock()
+        # 客户端/集合初始化锁：retrieve（to_thread 线程）与 rebuild（to_thread 线程）
+        # 并发时保证 PersistentClient/collection 只初始化一次（#40 并发复验）。
+        self._client_lock = threading.Lock()
         self._last_chunk_count = 0
 
     # -- readiness ---------------------------------------------------------
@@ -147,17 +150,20 @@ class KnowledgeIndex:
     def _ensure_client(self) -> None:
         if self._collection is not None:
             return
-        if not CHROMA_AVAILABLE:
-            raise RuntimeError("chromadb is not installed; install with: uv sync --extra rag")
-        self._persist_dir.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(
-            path=str(self._persist_dir),
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-        self._collection = self._client.get_or_create_collection(
-            name=self._collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        with self._client_lock:
+            if self._collection is not None:
+                return
+            if not CHROMA_AVAILABLE:
+                raise RuntimeError("chromadb is not installed; install with: uv sync --extra rag")
+            self._persist_dir.mkdir(parents=True, exist_ok=True)
+            self._client = chromadb.PersistentClient(
+                path=str(self._persist_dir),
+                settings=ChromaSettings(anonymized_telemetry=False),
+            )
+            self._collection = self._client.get_or_create_collection(
+                name=self._collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
 
     # -- scanning ----------------------------------------------------------
 

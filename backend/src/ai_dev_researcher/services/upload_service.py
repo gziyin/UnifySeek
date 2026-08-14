@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -120,7 +121,10 @@ class UploadService:
                 index_text = Path(artifact.normalized_storage_path).read_text(
                     encoding="utf-8", errors="replace"
                 )
-                self._vector_store.index_document(
+                # index_document 内部是同步 embed（可能首次加载模型/下载）+ chroma 写入（#40），
+                # offload 到线程池避免阻塞整个事件循环（upload 请求、run 后台任务全部被拖住）。
+                await asyncio.to_thread(
+                    self._vector_store.index_document,
                     artifact_id=str(artifact.artifact_id),
                     text=index_text,
                 )

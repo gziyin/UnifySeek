@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import UUID
 
@@ -129,7 +130,14 @@ async def search_run_documents_impl(
     target_ids = [str(item) for item in (artifact_ids or context.uploaded_artifact_ids)]
     if not target_ids:
         return {"query": query, "results": [], "note": "no artifacts indexed"}
-    chunks = vector_store.retrieve(query=query, artifact_ids=target_ids, top_k=top_k)
+    # vector_store.retrieve 内部是同步 embed + chroma query（#40），offload 到线程池，
+    # 避免阻塞事件循环、保证外层超时/取消可打断。
+    chunks = await asyncio.to_thread(
+        vector_store.retrieve,
+        query=query,
+        artifact_ids=target_ids,
+        top_k=top_k,
+    )
     results = []
     for chunk in chunks:
         artifact = await artifacts.get(UUID(chunk.artifact_id))

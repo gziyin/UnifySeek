@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -64,7 +65,11 @@ async def search_knowledge_base_impl(
     top_k = max(1, min(int(top_k), 50))
     score_threshold = max(0.0, float(score_threshold))
     try:
-        chunks = index.retrieve(
+        # index.retrieve 内部是同步 embed（SentenceTransformer.encode）+ chroma query，
+        # 直接跑在事件循环上会整环阻塞且无法被 asyncio.wait_for/cancel 打断（#40）。
+        # offload 到线程池后，调用方的超时/取消恢复可打断性。
+        chunks = await asyncio.to_thread(
+            index.retrieve,
             query=query,
             path=safe_path,
             top_k=top_k,

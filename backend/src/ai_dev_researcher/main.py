@@ -22,6 +22,7 @@ from ai_dev_researcher.repositories.sqlite import connect, init_db
 from ai_dev_researcher.services.agent_executor import AgentResearchExecutor
 from ai_dev_researcher.services.event_publisher import EventPublisher
 from ai_dev_researcher.services.fake_executor import FakeResearchExecutor
+from ai_dev_researcher.services.run_guard import converge_stuck_run, reap_stale_runs
 from ai_dev_researcher.services.run_service import RunService
 from ai_dev_researcher.services.session_service import SessionService
 from ai_dev_researcher.services.task_manager import TaskManager
@@ -160,7 +161,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     knowledge_index=knowledge_index,
                 )
 
-            task_manager = TaskManager(executor_factory)
+            async def _stale_reaper_loop() -> None:
+                interval = settings.stale_reap_interval_seconds
+                while True:
+                    await asyncio.sleep(interval)
+                    try:
+                        await reap_stale_runs(runs_repo, publisher, task_manager)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("stale run reap pass failed")
+
+            task_manager = TaskManager(
+                executor_factory,
+                on_stuck=lambda rid: converge_stuck_run(runs_repo, publisher, rid),
+                shutdown_timeout=settings.task_manager_shutdown_timeout_seconds,
+            )
+            reaper_task: asyncio.Task | None = asyncio.create_task(
+                _stale_reaper_loop(), name="stale-run-reaper"
+            )
             container = AppState(
                 settings=settings,
                 conn=conn,
@@ -193,6 +210,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     paths=paths,
                     publisher=publisher,
                     task_manager=task_manager,
+                    settings=settings,
                 ),
                 task_manager=task_manager,
                 vector_store=vector_store,
@@ -204,6 +222,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             finally:
                 if kb_build_task is not None:
                     kb_build_task.cancel()
+                if reaper_task is not None:
+                    reaper_task.cancel()
+                cleanup = [t for t in (reaper_task, kb_build_task) if t is not None]
+                if cleanup:
+                    await asyncio.gather(*cleanup, return_exceptions=True)
                 await task_manager.shutdown()
                 await conn.close()
 

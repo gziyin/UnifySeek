@@ -26,6 +26,7 @@ dependencies = [
 dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
+  "pytest-timeout>=2.3",
 ]
 agent = [
   "deepagents==0.6.12",
@@ -48,3 +49,5 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src"]
+# 防挂护栏：任何单测/集成超过 120s 直接失败，避免 #40 类卡死拖垮整个回归。
+timeout = "120"

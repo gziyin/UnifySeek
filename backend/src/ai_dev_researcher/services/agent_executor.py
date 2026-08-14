@@ -60,6 +60,43 @@ class _StreamAttemptResult:
     last_message: str | None = None
 
 
+# 空闲超时哨兵：事件流内连续 idle_timeout 秒无事件时由 _iter_with_idle_timeout 产出。
+_IDLE_TIMEOUT_SENTINEL: dict = {"event": "__agent_idle_timeout__"}
+
+
+def _iter_with_idle_timeout(stream, timeout: float | None):
+    """Wrap an async event stream with a per-event idle timeout (#40).
+
+    事件流内若连续 ``timeout`` 秒无事件（模型/工具调用卡住），产出
+    ``_IDLE_TIMEOUT_SENTINEL`` 并结束；否则原样转发事件。超时/提前退出/取消时
+    在 finally 中关闭底层流（带 2s 兜底，避免 aclose 自身挂死）。
+    """
+    iterator = stream.__aiter__()
+
+    async def _gen():
+        try:
+            while True:
+                try:
+                    if timeout:
+                        yield await asyncio.wait_for(anext(iterator), timeout=timeout)
+                    else:
+                        yield await anext(iterator)
+                except StopAsyncIteration:
+                    return
+                except asyncio.TimeoutError:
+                    yield _IDLE_TIMEOUT_SENTINEL
+                    return
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                try:
+                    await asyncio.wait_for(close(), timeout=2)
+                except Exception:  # noqa: BLE001 - aclose 失败/超时不影响收敛
+                    pass
+
+    return _gen()
+
+
 class AgentResearchExecutor:
     """Run-level DeepAgents executor with event adaptation."""
 
@@ -254,28 +291,32 @@ class AgentResearchExecutor:
                 payload={"report_artifact_id": report_artifact_id},
             )
         except asyncio.CancelledError:
-            current = await self._runs.get(run_id)
-            if current and RunStatus.CANCELLED in ALLOWED_TRANSITIONS.get(current.status, set()):
-                await self._runs.update_status(
-                    run_id,
-                    RunStatus.CANCELLED,
-                    finished=True,
-                    error_code="CANCELLED",
-                    error_message="Cancelled by user",
-                )
-                await self._publisher.publish(
-                    session_id=run.session_id,
-                    run_id=run_id,
-                    event_type="run.cancelled",
-                    payload={"reason": "user_cancelled"},
-                )
-            elif current:
-                logger.warning(
-                    "preserving run %s status %s instead of transitioning to %s",
-                    run_id,
-                    current.status,
-                    RunStatus.CANCELLED,
-                )
+            # 收敛自身异常不得逃逸（否则 task 失败且 run 永久 active，由 stale 回收器兜底）。
+            try:
+                current = await self._runs.get(run_id)
+                if current and RunStatus.CANCELLED in ALLOWED_TRANSITIONS.get(current.status, set()):
+                    await self._runs.update_status(
+                        run_id,
+                        RunStatus.CANCELLED,
+                        finished=True,
+                        error_code="CANCELLED",
+                        error_message="Cancelled by user",
+                    )
+                    await self._publisher.publish(
+                        session_id=run.session_id,
+                        run_id=run_id,
+                        event_type="run.cancelled",
+                        payload={"reason": "user_cancelled"},
+                    )
+                elif current:
+                    logger.warning(
+                        "preserving run %s status %s instead of transitioning to %s",
+                        run_id,
+                        current.status,
+                        RunStatus.CANCELLED,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to converge cancelled run %s", run_id)
             raise
         except _BudgetExceededError as exc:
             await self._fail_run_if_allowed(
@@ -309,39 +350,45 @@ class AgentResearchExecutor:
         reason: str,
         report_artifact_id: str | None = None,
     ) -> bool:
-        current = await self._runs.get(run_id)
-        if current is None:
-            return False
-        if RunStatus.FAILED not in ALLOWED_TRANSITIONS.get(current.status, set()):
-            logger.warning(
-                "preserving run %s status %s instead of transitioning to %s",
+        # 收敛路径自身异常不得逃逸：否则 task 失败且 run 行永久停留 active，
+        # session 被 409 锁死（#40）。异常只记录，终态由 stale 回收器兜底收敛。
+        try:
+            current = await self._runs.get(run_id)
+            if current is None:
+                return False
+            if RunStatus.FAILED not in ALLOWED_TRANSITIONS.get(current.status, set()):
+                logger.warning(
+                    "preserving run %s status %s instead of transitioning to %s",
+                    run_id,
+                    current.status,
+                    RunStatus.FAILED,
+                )
+                return False
+            report_id = UUID(report_artifact_id) if report_artifact_id else None
+            await self._runs.update_status(
                 run_id,
-                current.status,
                 RunStatus.FAILED,
+                finished=True,
+                error_code=error_code,
+                error_message=error_message,
+                report_artifact_id=report_id,
             )
+            await self._publisher.publish(
+                session_id=current.session_id,
+                run_id=run_id,
+                event_type="run.failed",
+                payload={
+                    "code": event_code,
+                    "message": event_message,
+                    "reason": reason,
+                    "retryable": False,
+                    "report_artifact_id": str(report_id) if report_id else None,
+                },
+            )
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to converge run %s to FAILED(%s)", run_id, error_code)
             return False
-        report_id = UUID(report_artifact_id) if report_artifact_id else None
-        await self._runs.update_status(
-            run_id,
-            RunStatus.FAILED,
-            finished=True,
-            error_code=error_code,
-            error_message=error_message,
-            report_artifact_id=report_id,
-        )
-        await self._publisher.publish(
-            session_id=current.session_id,
-            run_id=run_id,
-            event_type="run.failed",
-            payload={
-                "code": event_code,
-                "message": event_message,
-                "reason": reason,
-                "retryable": False,
-                "report_artifact_id": str(report_id) if report_id else None,
-            },
-        )
-        return True
 
     async def _run_agent_attempt(
         self,
@@ -359,6 +406,8 @@ class AgentResearchExecutor:
         # 维护 tool_call_id -> input_summary，用于在 tool.completed 上附带脱敏输入摘要。
         tool_inputs: dict[str, str] = {}
         started = time.monotonic()
+        stage_started = started
+        stage = "plan"
         tool_call_count = 0
         # 使用 v2 经典事件协议（on_tool_start/on_tool_end，{event,name,data,run_id}）。
         # langgraph 1.2.10 的 v3 是实验性 run-stream 协议（{type,method,params}），
@@ -366,8 +415,53 @@ class AgentResearchExecutor:
         stream = agent.astream_events(input_payload, config=config, version="v2")
         if inspect.isawaitable(stream):
             stream = await stream
+        idle_timeout = context.settings.agent_idle_timeout_seconds or None
 
-        async for raw in stream:
+        def _stage_budget() -> float | None:
+            if stage == "plan":
+                value = context.settings.agent_plan_timeout_seconds
+            elif stage == "research":
+                value = context.settings.agent_research_timeout_seconds
+            else:
+                value = context.settings.agent_report_timeout_seconds
+            return value or None
+
+        def _budget_reason_at(now: float) -> str | None:
+            # 阶段级看门狗：plan/research/report 各自独立预算，避免慢但正常的
+            # 单阶段误触发；总时长仍受 _budget_reason 的 max_elapsed 约束（#40）。
+            sb = _stage_budget()
+            if sb and now - stage_started >= sb:
+                return f"budget_exceeded: stage_timeout:{stage}"
+            return self._budget_reason(tool_call_count, now - started, context)
+
+        def _advance_stage(event_type: str, payload: dict) -> None:
+            nonlocal stage, stage_started
+            if stage == "plan" and (
+                event_type == "plan.updated" or event_type == "tool.started"
+            ):
+                stage = "research"
+                stage_started = time.monotonic()
+            elif (
+                stage == "research"
+                and event_type == "tool.started"
+                and payload.get("tool_name") == "submit_research_report"
+            ):
+                stage = "report"
+                stage_started = time.monotonic()
+
+        async for raw in _iter_with_idle_timeout(stream, idle_timeout):
+            if raw is _IDLE_TIMEOUT_SENTINEL:
+                logger.warning(
+                    "attempt %s idle timeout in stage=%s after %.1fs; treating as stuck",
+                    attempt_index,
+                    stage,
+                    time.monotonic() - started,
+                )
+                return _StreamAttemptResult(
+                    report_artifact_id=report_artifact_id,
+                    budget_reason=f"budget_exceeded: idle_timeout:{stage}",
+                    last_message=last_message or None,
+                )
             if not isinstance(raw, dict):
                 continue
             if raw.get("event") == "on_chat_model_end":
@@ -378,6 +472,7 @@ class AgentResearchExecutor:
             event_type, actor, payload = map_framework_event(raw)
             if event_type is None:
                 continue
+            _advance_stage(event_type, payload)
 
             if event_type == "tool.started":
                 tool_call_count += 1
@@ -511,11 +606,7 @@ class AgentResearchExecutor:
                 payload={k: v for k, v in payload.items() if k not in {"discovered", "recorded"}},
             )
 
-            budget_reason = self._budget_reason(
-                tool_call_count,
-                time.monotonic() - started,
-                context,
-            )
+            budget_reason = _budget_reason_at(time.monotonic())
             if budget_reason:
                 return _StreamAttemptResult(
                     report_artifact_id=report_artifact_id,
@@ -550,11 +641,12 @@ class AgentResearchExecutor:
                     top_k=self._settings.kb_prefetch_top_k,
                     score_threshold=self._settings.kb_prefetch_score_threshold,
                 ),
-                timeout=15,
+                timeout=self._settings.kb_prefetch_timeout_seconds,
             )
         except (asyncio.TimeoutError, TimeoutError):
             logger.warning(
-                "KB prefetch timed out after 15s for run %s; skipping prefetch",
+                "KB prefetch timed out after %ss for run %s; skipping prefetch",
+                self._settings.kb_prefetch_timeout_seconds,
                 context.run_id,
             )
             return

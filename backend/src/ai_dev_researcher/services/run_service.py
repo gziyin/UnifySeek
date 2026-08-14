@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+from ai_dev_researcher.core.config import Settings
 from ai_dev_researcher.core.errors import (
     RunConflictError,
     RunNotFoundError,
@@ -31,6 +32,7 @@ class RunService:
         paths: WorkspacePaths,
         publisher: EventPublisher,
         task_manager: TaskManager,
+        settings: Settings | None = None,
     ):
         self._sessions = sessions
         self._runs = runs
@@ -38,6 +40,7 @@ class RunService:
         self._paths = paths
         self._publisher = publisher
         self._task_manager = task_manager
+        self._settings = settings
 
     async def create_run(self, session_id: UUID, request: ResearchRequest) -> Run:
         session = await self._sessions.get(session_id)
@@ -86,8 +89,31 @@ class RunService:
         display_name = await self._resolve_display_name(session, request)
         self._paths.ensure_run_layout(session_id, run.run_id, display_name=display_name)
         await self._sessions.touch(session_id)
-        await self._task_manager.start_run(run.run_id)
+        await self._task_manager.start_run(run.run_id, timeout=self._hard_run_timeout(run))
         return run
+
+    def _hard_run_timeout(self, run: Run) -> float:
+        """TaskManager 硬超时 = run 总预算（含 constraints 覆盖）+ grace。
+
+        总预算为 0（不限制）时返回 0 表示禁用硬超时，与 executor 内总预算语义一致。
+        """
+        if self._settings is None:
+            return 0.0
+        max_elapsed = self._settings.agent_max_elapsed_seconds
+        for constraint in run.request.constraints:
+            stripped = constraint.strip()
+            for sep in ("=", ":"):
+                if sep not in stripped:
+                    continue
+                key, value = (part.strip() for part in stripped.split(sep, 1))
+                if key == "max_elapsed_seconds":
+                    try:
+                        max_elapsed = max(0.0, float(value))
+                    except ValueError:
+                        pass
+        if not max_elapsed:
+            return 0.0
+        return max_elapsed + self._settings.agent_hard_timeout_grace_seconds
 
     async def _resolve_display_name(self, session, request: ResearchRequest) -> str | None:
         """Resolve the display name used to name the session directory.

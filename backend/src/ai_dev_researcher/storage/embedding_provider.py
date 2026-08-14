@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -54,6 +55,9 @@ class SentenceTransformersProvider(EmbeddingProvider):
         self._embedding_offline = embedding_offline
         self._model = None
         self._dimension = 384  # all-MiniLM-L6-v2 默认维度，懒加载后以实际为准。
+        # 模型懒加载锁：rebuild（to_thread）与 retrieve（to_thread）并发首加载时只初始化一次，
+        # 避免同一模型被并发下载/加载两次（#40 并发复验）。
+        self._model_lock = threading.Lock()
 
     def _resolve_hf_cache_dir(self) -> str:
         """Resolve the HF hub cache root used for the model presence check."""
@@ -110,6 +114,12 @@ class SentenceTransformersProvider(EmbeddingProvider):
     def _ensure_model(self):
         if self._model is not None:
             return
+        with self._model_lock:
+            if self._model is not None:
+                return
+            self._load_model()
+
+    def _load_model(self) -> None:
         try:
             # Windows DLL 加载顺序防护：torch 必须先于 transformers 加载。
             from ai_dev_researcher.storage.torch_guard import ensure_torch_loaded
