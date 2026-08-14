@@ -124,6 +124,12 @@ export function ResearchWorkbench() {
       const events = await listEvents(runId, 0);
       if (!disposed) {
         dispatch({ type: "events", events });
+        // 同步推进 lastSeqRef，避免 connect() 在同步 ref 的 effect 运行前读到旧值，
+        // 导致初始 after_seq=0 全量重放（#42 重连/hydrate 竞态）。
+        lastSeqRef.current = events.reduce(
+          (max, event) => Math.max(max, event.seq),
+          lastSeqRef.current,
+        );
       }
     }
 
@@ -144,7 +150,25 @@ export function ResearchWorkbench() {
           if (!parsed.success) {
             return;
           }
-          dispatch({ type: "events", events: [parsed.data] });
+          const data = parsed.data;
+          if (data.type === "heartbeat") {
+            // 心跳携带服务端时钟 server_time，用于校准客户端↔服务端 wall-clock 偏移（#42）。
+            const serverTime = data.payload?.server_time;
+            if (typeof serverTime === "string") {
+              const serverTimeMs = Date.parse(serverTime);
+              if (!Number.isNaN(serverTimeMs)) {
+                dispatch({ type: "clockSync", serverTimeMs });
+              }
+            }
+            return;
+          }
+          // 实时事件（非 hydrate）的 occurred_at 即服务端 publish 时刻，同样可校准；
+          // hydrate 走上方 listEvents→events dispatch，其历史时间戳不用于校准。
+          const occurredMs = Date.parse(data.occurred_at);
+          if (!Number.isNaN(occurredMs)) {
+            dispatch({ type: "clockSync", serverTimeMs: occurredMs });
+          }
+          dispatch({ type: "events", events: [data] });
         } catch {
           // ignore malformed frames
         }
@@ -264,6 +288,9 @@ export function ResearchWorkbench() {
         uploaded_artifact_ids: artifacts.map((item) => item.artifact_id),
         max_web_sources: MODE_MAX_SOURCES[submittedMode],
       });
+      // F1(#41)：提交即乐观激活规划阶段（进行中 + 计时走动），不等首事件回显。
+      // 幂等：reducer 仅在 plan 仍 pending 时置位；真实 run.started 不会覆盖。
+      dispatch({ type: "optimisticStart", at: Date.now() });
       setRun(created);
     },
     [sessionId, artifacts],

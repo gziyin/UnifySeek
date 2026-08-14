@@ -159,3 +159,134 @@ describe("runEventReducer phases (issue #27 / #34)", () => {
     expect(state.phases[0].status).toBe("done");
   });
 });
+
+describe("F1 optimisticStart (#41) — 提交即激活规划阶段", () => {
+  it("activates plan + total timer at submit time", () => {
+    const at = Date.now();
+    const state = runEventReducer(initialRunViewState, { type: "optimisticStart", at });
+    expect(state.phases[0].status).toBe("active");
+    expect(state.phases[0].startedAt).toBe(at);
+    expect(state.totalStartedAt).toBe(at);
+    expect(state.phases[1].status).toBe("pending");
+    expect(state.runFinished).toBe(false);
+  });
+
+  it("idempotent: second optimisticStart is a no-op", () => {
+    const at1 = Date.now();
+    const first = runEventReducer(initialRunViewState, { type: "optimisticStart", at: at1 });
+    const state = runEventReducer(first, { type: "optimisticStart", at: at1 + 5000 });
+    expect(state.phases[0].startedAt).toBe(at1);
+    expect(state.totalStartedAt).toBe(at1);
+  });
+
+  it("real run.started does not overwrite optimistic startedAt / totalStartedAt", () => {
+    const at = Date.parse("2026-08-03T00:00:10Z");
+    const optimistic = runEventReducer(initialRunViewState, { type: "optimisticStart", at });
+    const state = runEventReducer(optimistic, {
+      type: "events",
+      events: [makeEvent("run.started", {}, 1, "2026-08-03T00:00:15Z")],
+    });
+    expect(state.phases[0].status).toBe("active");
+    expect(state.phases[0].startedAt).toBe(at); // 未被 15s 覆盖
+    expect(state.totalStartedAt).toBe(at);
+  });
+
+  it("optimisticStart does nothing once run.started already arrived", () => {
+    const base = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [makeEvent("run.started", {}, 1, "2026-08-03T00:00:10Z")],
+    });
+    const state = runEventReducer(base, {
+      type: "optimisticStart",
+      at: Date.parse("2026-08-03T00:00:05Z"),
+    });
+    expect(state.phases[0].startedAt).toBe(T10);
+    expect(state.totalStartedAt).toBe(T10);
+  });
+
+  it("optimistic total freezes consistently at terminal", () => {
+    const at = Date.parse("2026-08-03T00:00:10Z");
+    const optimistic = runEventReducer(initialRunViewState, { type: "optimisticStart", at });
+    const state = runEventReducer(optimistic, {
+      type: "events",
+      events: [
+        makeEvent("tool.started", { tool_name: "search_web" }, 2, "2026-08-03T00:00:40Z"),
+        makeEvent("run.succeeded", { report_artifact_id: "a1" }, 3, "2026-08-03T00:01:40Z"),
+      ],
+    });
+    expect(state.runFinished).toBe(true);
+    expect(state.totalElapsedMs).toBe(T100 - at);
+    expect(state.phases[0].elapsedMs).toBe(T40 - at); // plan = 提交→研究开始
+  });
+});
+
+describe("F2 clock & replay (#42)", () => {
+  it("clockSync stores client-server offset (now - serverTimeMs)", () => {
+    const serverTimeMs = Date.parse("2026-08-03T00:00:10Z");
+    const state = runEventReducer(initialRunViewState, { type: "clockSync", serverTimeMs });
+    const expected = Date.now() - serverTimeMs;
+    expect(state.clockOffsetMs).toBeGreaterThan(0);
+    expect(Math.abs(state.clockOffsetMs - expected)).toBeLessThan(100);
+  });
+
+  it("tiny clockSync deltas are ignored (no re-render churn)", () => {
+    const serverTimeMs = Date.parse("2026-08-03T00:00:10Z");
+    const base = runEventReducer(initialRunViewState, { type: "clockSync", serverTimeMs });
+    const state = runEventReducer(base, { type: "clockSync", serverTimeMs: serverTimeMs - 2 });
+    expect(state.clockOffsetMs).toBe(base.clockOffsetMs);
+  });
+
+  it("replay of already-seen events does not recompute startedAt / totalElapsedMs", () => {
+    let state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [makeEvent("run.started", {}, 1, "2026-08-03T00:00:10Z")],
+    });
+    state = runEventReducer(state, {
+      type: "events",
+      events: [makeEvent("tool.started", { tool_name: "search_web" }, 2, "2026-08-03T00:00:40Z")],
+    });
+    state = runEventReducer(state, {
+      type: "events",
+      events: [makeEvent("run.succeeded", { report_artifact_id: "a1" }, 3, "2026-08-03T00:01:40Z")],
+    });
+    const snapshot = {
+      startedAt: state.phases.map((p) => p.startedAt),
+      statuses: state.phases.map((p) => p.status),
+      elapsedMs: state.phases.map((p) => p.elapsedMs),
+      totalElapsedMs: state.totalElapsedMs,
+      totalStartedAt: state.totalStartedAt,
+    };
+    // 整批重放（模拟 after_seq=0 全量回放 / WS 重连）——全部已 seen，不得改变任何计时。
+    const replayed = runEventReducer(state, {
+      type: "events",
+      events: [
+        makeEvent("run.started", {}, 1, "2026-08-03T00:00:10Z"),
+        makeEvent("tool.started", { tool_name: "search_web" }, 2, "2026-08-03T00:00:40Z"),
+        makeEvent("run.succeeded", { report_artifact_id: "a1" }, 3, "2026-08-03T00:01:40Z"),
+      ],
+    });
+    expect(replayed.events).toHaveLength(3);
+    expect(replayed.phases.map((p) => p.startedAt)).toEqual(snapshot.startedAt);
+    expect(replayed.phases.map((p) => p.status)).toEqual(snapshot.statuses);
+    expect(replayed.phases.map((p) => p.elapsedMs)).toEqual(snapshot.elapsedMs);
+    expect(replayed.totalElapsedMs).toBe(snapshot.totalElapsedMs);
+    expect(replayed.totalStartedAt).toBe(snapshot.totalStartedAt);
+  });
+});
+
+describe("terminal includes run.interrupted (E1 兼容护栏)", () => {
+  it("run.interrupted freezes phases and total (defensive)", () => {
+    let state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [makeEvent("run.started", {}, 1, "2026-08-03T00:00:10Z")],
+    });
+    state = runEventReducer(state, {
+      type: "events",
+      events: [makeEvent("run.interrupted", { reason: "stale_reclaimed" }, 2, "2026-08-03T00:00:40Z")],
+    });
+    expect(state.runFinished).toBe(true);
+    expect(state.phases[0].status).toBe("done"); // 已 active 的规划阶段被冻结
+    expect(state.phases[1].status).toBe("pending"); // 未发生阶段保持 pending
+    expect(state.totalElapsedMs).toBe(T40 - T10);
+  });
+});

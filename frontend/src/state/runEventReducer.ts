@@ -43,8 +43,15 @@ export type RunViewState = {
   totalStartedAt: number | null;
   /** 总耗时冻结值（ms）：runFinished 后有效。 */
   totalElapsedMs: number;
-  /** run 是否已达终态（succeeded/failed/cancelled）：终态后计时冻结。 */
+  /** run 是否已达终态（succeeded/failed/cancelled/interrupted）：终态后计时冻结。 */
   runFinished: boolean;
+  /**
+   * 客户端 ↔ 服务端 wall-clock 偏移（ms）= 客户端接收时刻 − 服务端时间戳
+   * （由 clockSync 用心跳 server_time / 实时事件 occurred_at 校准，#42）。
+   * 显示侧用 `Date.now() - clockOffsetMs` 换算回服务端时钟再与事件起点相减，
+   * 避免客户端 `Date.now()` 与服务端 `occurred_at` 直接混算造成计时偏移/终态跳变。
+   */
+  clockOffsetMs: number;
 };
 
 const PHASE_DEFS: Array<{ key: PhaseKey; label: string }> = [
@@ -74,14 +81,24 @@ export const initialRunViewState: RunViewState = {
   totalStartedAt: null,
   totalElapsedMs: 0,
   runFinished: false,
+  clockOffsetMs: 0,
 };
 
 export type RunViewAction =
   | { type: "reset" }
   | { type: "connection"; connection: ConnectionState }
-  | { type: "events"; events: ResearchEvent[] };
+  | { type: "events"; events: ResearchEvent[] }
+  | { type: "optimisticStart"; at: number }
+  | { type: "clockSync"; serverTimeMs: number };
 
-const TERMINAL_TYPES = new Set(["run.succeeded", "run.failed", "run.cancelled"]);
+// 终态集合：含 run.interrupted（防御性兼容——E1(#40) 的 stale 回收/看门狗会发布
+// run.interrupted 事件；未合并前加入亦无害）。
+const TERMINAL_TYPES = new Set([
+  "run.succeeded",
+  "run.failed",
+  "run.cancelled",
+  "run.interrupted",
+]);
 
 /**
  * 事件 → 时钟起点（epoch ms）。
@@ -187,6 +204,36 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
       return { ...initialRunViewState };
     case "connection":
       return { ...state, connection: action.connection };
+    case "clockSync": {
+      // #42：校准客户端↔服务端 wall-clock 偏移。小偏移（<5ms）视为噪声，跳过以免无谓重渲染。
+      const offset = Number.isFinite(action.serverTimeMs)
+        ? Date.now() - action.serverTimeMs
+        : 0;
+      if (Math.abs(offset - state.clockOffsetMs) < 5) {
+        return state;
+      }
+      return { ...state, clockOffsetMs: offset };
+    }
+    case "optimisticStart": {
+      // F1(#41)：提交即乐观激活规划阶段（进行中 + 计时走动），不等首事件回显。
+      // 幂等：仅当 plan 仍 pending 且总计时起点未建立时置位；真实 run.started 到达后
+      // advancePhases 不会覆盖已 active 阶段的 startedAt，总计时保持在提交时刻。
+      const plan = state.phases[0];
+      if (
+        state.runFinished ||
+        plan.status !== "pending" ||
+        state.totalStartedAt != null
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        phases: state.phases.map((p, i) =>
+          i === 0 ? { ...p, status: "active" as const, startedAt: action.at } : p,
+        ),
+        totalStartedAt: action.at,
+      };
+    }
     case "events": {
       const merged = [...state.events];
       const seen = new Set(merged.map((item) => item.seq));
