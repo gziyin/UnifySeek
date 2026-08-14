@@ -119,41 +119,70 @@ class SentenceTransformersProvider(EmbeddingProvider):
                 return
             self._load_model()
 
+    def _resolve_local_model_path(self, cache_dir: str) -> str | None:
+        """Resolve the on-disk snapshot directory for a fully-offline load.
+
+        Returns the snapshot path when the model is cached locally, otherwise
+        None. Passing a local directory to SentenceTransformer avoids
+        huggingface_hub entirely, whose metadata calls would otherwise hang on
+        machines without access to huggingface.co (the #40 / run-stuck cause).
+        """
+        base = Path(cache_dir) / f"models--{self._model_name.replace('/', '--')}"
+        snapshots = base / "snapshots"
+        if not snapshots.is_dir():
+            return None
+        # Prefer the revision recorded in refs/main; else fall back to any snapshot dir.
+        ref = base / "refs" / "main"
+        if ref.is_file():
+            rev = ref.read_text(encoding="utf-8").strip()
+            if rev and (snapshots / rev).is_dir():
+                return str(snapshots / rev)
+        for child in snapshots.iterdir():
+            if child.is_dir():
+                return str(child)
+        return None
+
     def _load_model(self) -> None:
         try:
             # Windows DLL 加载顺序防护：torch 必须先于 transformers 加载。
             from ai_dev_researcher.storage.torch_guard import ensure_torch_loaded
 
             ensure_torch_loaded()
-            if self._hf_hub_cache:
-                import os
-
-                os.environ["HF_HUB_CACHE"] = self._hf_hub_cache
             cache_dir = self._resolve_hf_cache_dir()
-            has_local_cache = self._model_cache_dir_exists(cache_dir, self._model_name)
-            offline = self._resolve_offline()
-            if offline and not has_local_cache:
+            local_path = self._resolve_local_model_path(cache_dir)
+            if local_path is None:
                 expected = (
-                    cache_dir.rstrip("\\/") + "/models--" + self._model_name.replace("/", "--")
+                    cache_dir.rstrip("\\/")
+                    + "/models--"
+                    + self._model_name.replace("/", "--")
+                    + "/snapshots/<rev>"
                 )
                 raise RuntimeError(
-                    f"embedding model '{self._model_name}' is missing from HF cache "
-                    f"'{cache_dir}' (expected e.g. {expected}) and offline mode is enabled "
-                    f"(HF_HUB_OFFLINE=1 or embedding_offline=true). Download the model once "
-                    "or point HF_HUB_CACHE at a populated cache."
+                    f"embedding model '{self._model_name}' is missing from local cache "
+                    f"'{cache_dir}' (expected a populated snapshots dir, e.g. {expected}). "
+                    "Download the model once or point HF_HUB_CACHE at a populated cache."
                 )
-            if offline or has_local_cache:
-                import os
+            # Load fully offline from the local snapshot directory — never go
+            # through huggingface_hub, whose metadata calls hang without network.
+            import os
 
-                os.environ["HF_HUB_OFFLINE"] = "1"
+            if self._hf_hub_cache:
+                os.environ["HF_HUB_CACHE"] = self._hf_hub_cache
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self._model_name)
+            self._model = SentenceTransformer(local_path)
             try:
                 self._dimension = int(self._model.get_embedding_dimension())
             except AttributeError:
                 self._dimension = int(self._model.get_sentence_embedding_dimension())
-            logger.info("loaded embedding model %s (dim=%s)", self._model_name, self._dimension)
+            logger.info(
+                "loaded embedding model %s from local snapshot %s (dim=%s)",
+                self._model_name,
+                local_path,
+                self._dimension,
+            )
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"failed to load embedding model {self._model_name}: {exc}") from exc
 

@@ -207,13 +207,21 @@ def test_offline_with_local_cache_loads_and_sets_hf_offline(tmp_path: Path, monk
     from ai_dev_researcher.storage.embedding_provider import SentenceTransformersProvider
 
     cache = tmp_path / "hf-cache"
-    (cache / "models--sentence-transformers--all-MiniLM-L6-v2").mkdir(parents=True)
+    snapshot = (
+        cache
+        / "models--sentence-transformers--all-MiniLM-L6-v2"
+        / "snapshots"
+        / "abc123"
+    )
+    snapshot.mkdir(parents=True)
 
     fake_st = types.ModuleType("sentence_transformers")
+    loaded_with: list[str] = []
 
     class FakeModel:
         def __init__(self, name: str):
             self._name = name
+            loaded_with.append(name)
 
         def get_sentence_embedding_dimension(self) -> int:
             return 384
@@ -229,5 +237,8 @@ def test_offline_with_local_cache_loads_and_sets_hf_offline(tmp_path: Path, monk
     )
     provider._ensure_model()
     assert provider._model is not None
+    # 关键回归 #40：必须加载本地快照目录，绝不把 repo id 交给 SentenceTransformer（否则走网络）。
+    assert loaded_with and loaded_with[0] == str(snapshot)
     assert os.environ.get("HF_HUB_OFFLINE") == "1"
+    assert os.environ.get("TRANSFORMERS_OFFLINE") == "1"
     assert provider.dimension == 384
