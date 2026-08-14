@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { deleteSession, listRunsForSession, listSessions } from "../api/client";
 import type { Run, SessionListItem } from "../domain/schemas";
 
@@ -57,6 +57,16 @@ export function HistoryDrawer({ open, onClose, onRestore, onDeleteSession, onNew
   const [loadError, setLoadError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [runsBySession, setRunsBySession] = useState<Record<string, Run[]>>({});
+
+  // 删除会话成功后主动重拉列表，以服务端为准（#38）。
+  const reloadSessions = useCallback(async () => {
+    try {
+      const list = await listSessions();
+      setSessions(list);
+    } catch {
+      // 刷新失败保留现有列表（乐观删除已生效），不做额外处理。
+    }
+  }, []);
 
   // 打开时加载会话列表，并聚焦抽屉
   useEffect(() => {
@@ -137,6 +147,7 @@ export function HistoryDrawer({ open, onClose, onRestore, onDeleteSession, onNew
         setExpandedId(null);
       }
       onDeleteSession?.(session.session_id);
+      void reloadSessions();
     } catch {
       // 删除失败保留现状；不做额外处理。
     }
