@@ -918,6 +918,11 @@ code,
   color: var(--mist);
   margin: 0 0 0.6rem;
 }
+.report-preview em.report-source {
+  color: var(--haze);
+  font-style: italic;
+  font-size: 0.82rem;
+}
 
 /* 降级提示 */
 .report-banner {

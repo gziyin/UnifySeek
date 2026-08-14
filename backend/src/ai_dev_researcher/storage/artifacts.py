@@ -15,7 +15,7 @@ from ai_dev_researcher.domain.reports import (
 def _build_numbering(
     report: ResearchReport, claims_by_id: dict[str, ResearchClaim]
 ) -> dict[str, int]:
-    """按渲染顺序（执行摘要 → sections 深度优先含 table → 资料冲突 → 行动建议）
+    """按渲染顺序（核心结论 → sections 深度优先含 table → 资料冲突 → 行动建议）
     首次出现顺序遍历全部 citation_ids，建立 evidence_id → 1-based 编号映射（去重）。"""
     order: list[str] = []
     seen: set[str] = set()
@@ -52,28 +52,68 @@ def _build_numbering(
     return {cid: i + 1 for i, cid in enumerate(order)}
 
 
-def _render_claim_paragraph(
-    claim: ResearchClaim, numbering: dict[str, int]
-) -> str:
-    """段落式 claim：statement（可含粗体）原样输出，后附 [n] 编号引用。"""
-    cites = "".join(
-        f"[{numbering[c]}]" for c in claim.citation_ids if c in numbering
-    )
-    return f"{claim.statement}{cites}"
+_REFINE_SUMMARY_MAX_CHARS = 120
 
 
-def _render_table(table: ReportTable, numbering: dict[str, int]) -> list[str]:
+def _truncate_summary(text: str, limit: int = _REFINE_SUMMARY_MAX_CHARS) -> str:
+    """核心结论精炼：先剥掉 markdown 强调/代码标记（避免截断留下未闭合 **），
+    超限则截到 limit 并补省略号，未超限原样返回（保留粗体）。"""
+    cleaned = text.replace("**", "").replace("`", "").replace("*", "")
+    if len(cleaned) <= limit:
+        return text
+    return cleaned[:limit].rstrip() + "…"
+
+
+def _render_sources_line(
+    citation_ids: list[str], numbering: dict[str, int]
+) -> str | None:
+    """章节聚合来源行（章节内首次出现顺序、去重），灰斜体 *来源：[n][n]...*。"""
+    seen: list[str] = []
+    for cid in citation_ids:
+        if cid in numbering and cid not in seen:
+            seen.append(cid)
+    if not seen:
+        return None
+    cites = "".join(f"[{numbering[c]}]" for c in seen)
+    return f"*来源：{cites}*"
+
+
+def _render_claim_paragraph(claim: ResearchClaim) -> str:
+    """段落式 claim：statement（可含粗体）原样输出，引用由章节末尾聚合标注。"""
+    return claim.statement
+
+
+def _render_table(table: ReportTable) -> list[str]:
     out: list[str] = [
         "| " + " | ".join(table.columns) + " |",
         "|" + "|".join(["---"] * len(table.columns)) + "|",
     ]
     for row in table.rows:
         out.append("| " + " | ".join(row) + " |")
-    cites = "".join(f"[{numbering[c]}]" for c in table.citation_ids if c in numbering)
-    if cites:
-        out.append("")
-        out.append(f"*来源：{cites}*")
     return out
+
+
+def _collect_section_cites(sec: ReportSection) -> list[str]:
+    """收集整棵子树（claims + table + subsections）的 citation_ids，章节内首次出现去重。"""
+    order: list[str] = []
+    seen: set[str] = set()
+
+    def add(cids: list[str]) -> None:
+        for cid in cids:
+            if cid not in seen:
+                seen.add(cid)
+                order.append(cid)
+
+    def walk(s: ReportSection) -> None:
+        for claim in s.claims:
+            add(claim.citation_ids)
+        if s.table is not None:
+            add(s.table.citation_ids)
+        for sub in s.subsections:
+            walk(sub)
+
+    walk(sec)
+    return order
 
 
 def _render_section(
@@ -82,13 +122,17 @@ def _render_section(
     lines.append(f"{'#' * level} {sec.heading}")
     lines.append("")
     for claim in sec.claims:
-        lines.append(_render_claim_paragraph(claim, numbering))
+        lines.append(_render_claim_paragraph(claim))
     lines.append("")
     if sec.table is not None:
-        lines.extend(_render_table(sec.table, numbering))
+        lines.extend(_render_table(sec.table))
         lines.append("")
     for sub in sec.subsections:
         _render_section(lines, sub, numbering, level + 1)
+    source_line = _render_sources_line(_collect_section_cites(sec), numbering)
+    if source_line:
+        lines.append(source_line)
+        lines.append("")
 
 
 def render_report_markdown(
@@ -99,12 +143,27 @@ def render_report_markdown(
     numbering = _build_numbering(report, claims_by_id)
     lines: list[str] = [f"# {report.title}", ""]
 
-    lines.append("## 执行摘要")
+    lines.append("## 核心结论")
     lines.append("")
     for claim_id in report.executive_summary_claim_ids:
         claim = claims_by_id.get(claim_id)
         if claim is not None:
-            lines.append(_render_claim_paragraph(claim, numbering))
+            lines.append(_truncate_summary(claim.statement))
+    source_line = _render_sources_line(
+        [
+            cid
+            for claim_id in report.executive_summary_claim_ids
+            for cid in (
+                claims_by_id.get(claim_id).citation_ids
+                if claims_by_id.get(claim_id) is not None
+                else []
+            )
+        ],
+        numbering,
+    )
+    if source_line:
+        lines.append("")
+        lines.append(source_line)
     lines.append("")
 
     for sec in report.sections:
@@ -117,10 +176,19 @@ def render_report_markdown(
             lines.append(f"### {item.topic}")
             lines.append("")
             for side in item.sides:
-                cites = "".join(
-                    f"[{numbering[c]}]" for c in side.citation_ids if c in numbering
-                )
-                lines.append(f"- {side.position}{cites}")
+                lines.append(f"- {side.position}")
+            lines.append("")
+        source_line = _render_sources_line(
+            [
+                cid
+                for item in report.disagreements
+                for side in item.sides
+                for cid in side.citation_ids
+            ],
+            numbering,
+        )
+        if source_line:
+            lines.append(source_line)
             lines.append("")
 
     if report.unknowns:
@@ -134,7 +202,14 @@ def render_report_markdown(
         lines.append("## 行动建议")
         lines.append("")
         for claim in report.recommendations:
-            lines.append(_render_claim_paragraph(claim, numbering))
+            lines.append(_render_claim_paragraph(claim))
+        source_line = _render_sources_line(
+            [cid for claim in report.recommendations for cid in claim.citation_ids],
+            numbering,
+        )
+        if source_line:
+            lines.append("")
+            lines.append(source_line)
         lines.append("")
 
     if evidence_by_id and numbering:
