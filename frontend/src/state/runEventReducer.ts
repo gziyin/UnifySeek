@@ -101,6 +101,23 @@ const TERMINAL_TYPES = new Set([
 ]);
 
 /**
+ * clockSync 校准阈值（#42）：仅当新样本偏移与当前 clockOffsetMs 偏差 ≥ 该值时
+ * 才更新。心跳 server_time / 事件 occurred_at 均含网络/DB 写库/WS 队列延迟，
+ * 抖动通常 <100ms；死区过小（原 5ms）会让 offset 随延迟抖动来回改写，
+ * 导致显示时钟 now 平移 → 计时「忽快忽慢」。150ms 阈值吸收抖动，只响应真实时钟漂移。
+ */
+export const CLOCK_SYNC_THRESHOLD_MS = 150;
+
+/**
+ * 显示层单调钳制（#42 残余根因2）：活跃阶段/总耗时按「不小于上一次渲染值」渲染，
+ * 杜绝 offset 突变或 active→done 切换导致的计时回跳。prev 为上次渲染值，undefined 表示首次。
+ * 仅作用于显示层；reducer 的冻结值（totalElapsedMs / phase.elapsedMs）不在此改动。
+ */
+export function clampElapsed(prev: number | undefined, computed: number): number {
+  return prev === undefined ? Math.max(0, computed) : Math.max(prev, computed);
+}
+
+/**
  * 事件 → 时钟起点（epoch ms）。
  *
  * 计时以事件自身的 `occurred_at` 为准，而非共享的 `performance.now()`：hydrate 时
@@ -205,11 +222,12 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
     case "connection":
       return { ...state, connection: action.connection };
     case "clockSync": {
-      // #42：校准客户端↔服务端 wall-clock 偏移。小偏移（<5ms）视为噪声，跳过以免无谓重渲染。
+      // #42：校准客户端↔服务端 wall-clock 偏移。偏差 < CLOCK_SYNC_THRESHOLD_MS 的抖动
+      // 视为网络/队列延迟噪声，跳过以免 offset 频繁改写导致显示计时「忽快忽慢」。
       const offset = Number.isFinite(action.serverTimeMs)
         ? Date.now() - action.serverTimeMs
         : 0;
-      if (Math.abs(offset - state.clockOffsetMs) < 5) {
+      if (Math.abs(offset - state.clockOffsetMs) < CLOCK_SYNC_THRESHOLD_MS) {
         return state;
       }
       return { ...state, clockOffsetMs: offset };

@@ -1,6 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ResearchEvent } from "../domain/schemas";
-import { type Phase, type RunViewState } from "../state/runEventReducer";
+import {
+  clampElapsed,
+  type Phase,
+  type RunViewState,
+} from "../state/runEventReducer";
 
 type Props = {
   state: RunViewState;
@@ -27,9 +31,7 @@ function statusFor(state: RunViewState) {
 }
 
 /** 大阶段卡片：进行中转圈、完成 ✔、待开始灰点；各阶段独立计时。 */
-function PhaseItem({ phase, now }: { phase: Phase; now: number }) {
-  const elapsed =
-    phase.status === "active" && phase.startedAt ? now - phase.startedAt : phase.elapsedMs;
+function PhaseItem({ phase, elapsed }: { phase: Phase; elapsed: number }) {
   return (
     <div className={`phase-item phase-${phase.status}`}>
       <span className="phase-status" aria-hidden="true">
@@ -255,19 +257,53 @@ export function TimelineCard({ state }: Props) {
   useEffect(() => {
     if (state.runFinished) return;
     const id = window.setInterval(() => setTick((t) => t + 1), 1000);
-    return () => window.clearInterval(id);
+    // 后台标签页 setInterval 被浏览器节流（固有行为）；恢复前台立即补一次 tick，
+    // 让计时显示及时追上真实流逝，而不是等下一个被调度的 interval。
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        setTick((t) => t + 1);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [state.runFinished]);
 
   // 统一 wall-clock（#42）：reducer 的 phase.startedAt / totalStartedAt 取自事件
   // occurred_at（服务端 epoch ms）；clockOffsetMs 为「客户端接收时刻 − 服务端时间戳」
-  // 校准值（clockSync 用心跳/实时事件维护）。显示侧用 Date.now() - clockOffsetMs
-  // 换算回服务端 wall-clock 再相减，活跃阶段实时刷新与终态冻结值都在同一时钟上，
-  // 避免客户端 Date.now() 与服务端事件时间戳直接混算导致计时偏移、终态跳变。
+  // 校准值（clockSync 用心跳/实时事件维护，CLOCK_SYNC_THRESHOLD_MS 防抖）。显示侧用
+  // Date.now() - clockOffsetMs 换算回服务端 wall-clock 再相减，活跃阶段实时刷新与
+  // 终态冻结值都在同一时钟上，避免客户端 Date.now() 与服务端事件时间戳直接混算。
+  //
+  // 单调钳制（#42）：clampRef 记录每个阶段/总耗时上一次渲染的原始 ms 值，显示取
+  // max(prev, computed)，杜绝 offset 突变回跳与 active→done 切换回跳。totalKeyRef
+  // 追踪 run 身份（totalStartedAt，reset/新建/恢复时变化），身份变化即重置钳制状态，
+  // 避免跨 run 污染。
+  const totalKeyRef = useRef<number | null>(null);
+  const clampRef = useRef<Map<string, number>>(new Map());
+  if (totalKeyRef.current !== state.totalStartedAt) {
+    totalKeyRef.current = state.totalStartedAt;
+    clampRef.current = new Map();
+  }
+  const clamp = (key: string, computed: number): number => {
+    const prev = clampRef.current.get(key);
+    const next = clampElapsed(prev, computed);
+    clampRef.current.set(key, next);
+    return next;
+  };
+
   const now = Date.now() - state.clockOffsetMs;
+  const phases = state.phases.map((p) => ({
+    phase: p,
+    elapsed: clamp(
+      `phase:${p.key}`,
+      p.status === "active" && p.startedAt ? now - p.startedAt : p.elapsedMs,
+    ),
+  }));
   const totalElapsed = state.totalStartedAt
-    ? state.runFinished
-      ? state.totalElapsedMs
-      : now - state.totalStartedAt
+    ? clamp("total", state.runFinished ? state.totalElapsedMs : now - state.totalStartedAt)
     : 0;
 
   return (
@@ -287,8 +323,8 @@ export function TimelineCard({ state }: Props) {
           </div>
 
           <div className="phase-list" aria-label="执行阶段">
-            {state.phases.map((phase) => (
-              <PhaseItem key={phase.key} phase={phase} now={now} />
+            {phases.map(({ phase, elapsed }) => (
+              <PhaseItem key={phase.key} phase={phase} elapsed={elapsed} />
             ))}
           </div>
 
