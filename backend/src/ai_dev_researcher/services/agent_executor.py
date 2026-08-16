@@ -20,6 +20,7 @@ from ai_dev_researcher.services.event_publisher import EventPublisher
 from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.storage.paths import WorkspacePaths
 from ai_dev_researcher.tools.knowledge_base import (
+    KbToolBudget,
     record_knowledge_base_evidence_impl,
     search_knowledge_base_impl,
 )
@@ -160,6 +161,7 @@ class AgentResearchExecutor:
             await self._prefetch_knowledge(context, store)
 
             model_binding = create_model_binding(self._settings)
+            kb_budget = KbToolBudget(self._settings.kb_max_tool_calls)
             agent = create_research_agent(
                 context,
                 model_binding,
@@ -167,6 +169,7 @@ class AgentResearchExecutor:
                 self._artifacts,
                 vector_store=self._vector_store,
                 knowledge_index=self._knowledge_index,
+                kb_budget=kb_budget,
             )
             input_payload = {
                 "messages": [
@@ -517,52 +520,56 @@ class AgentResearchExecutor:
 
             if event_type == "tool.completed" and payload.get("recorded"):
                 recorded = payload["recorded"]
-                tool_name = payload.get("tool_name", "")
-                if tool_name == "record_knowledge_base_evidence":
-                    actor = "document-analyst"
-                    source_type = "knowledge_base"
-                    source_title = recorded.get("title", "knowledge_base")
-                    discover_payload: dict = {
-                        "evidence_id": recorded.get("evidence_id"),
-                        "source_type": source_type,
-                        "title": source_title,
-                        "path": recorded.get("path"),
-                        "evidence_level": "first_party",
-                    }
-                else:
-                    actor = "document-analyst"
-                    source_type = "document"
-                    source_title = recorded.get("title", "document")
-                    discover_payload = {
-                        "evidence_id": recorded.get("evidence_id"),
-                        "source_type": source_type,
-                        "title": source_title,
-                        "artifact_id": recorded.get("artifact_id"),
-                        "display_name": recorded.get("display_name"),
-                        "evidence_level": "user_document",
-                    }
-                await self._publisher.publish(
-                    session_id=run.session_id,
-                    run_id=run.run_id,
-                    event_type="source.discovered",
-                    actor=actor,
-                    payload=discover_payload,
-                )
-                await self._publisher.publish(
-                    session_id=run.session_id,
-                    run_id=run.run_id,
-                    event_type="evidence.recorded",
-                    actor=actor,
-                    payload={
-                        "evidence_id": recorded.get("evidence_id"),
-                        "source_type": source_type,
-                        "locator": recorded.get("locator"),
-                        "line_start": recorded.get("line_start"),
-                        "line_end": recorded.get("line_end"),
-                        "page": recorded.get("page"),
-                        "excerpt": (recorded.get("excerpt") or "")[:200],
-                    },
-                )
+                # KB 软预算短路（#13）：record 被预算拦下时不产生真实证据，
+                # 不发布 source.discovered / evidence.recorded 脏账本事件；
+                # 引导提示已随 tool.completed 的 output_summary 转发给前端。
+                if recorded.get("note") != "budget_exceeded":
+                    tool_name = payload.get("tool_name", "")
+                    if tool_name == "record_knowledge_base_evidence":
+                        actor = "document-analyst"
+                        source_type = "knowledge_base"
+                        source_title = recorded.get("title", "knowledge_base")
+                        discover_payload: dict = {
+                            "evidence_id": recorded.get("evidence_id"),
+                            "source_type": source_type,
+                            "title": source_title,
+                            "path": recorded.get("path"),
+                            "evidence_level": "first_party",
+                        }
+                    else:
+                        actor = "document-analyst"
+                        source_type = "document"
+                        source_title = recorded.get("title", "document")
+                        discover_payload = {
+                            "evidence_id": recorded.get("evidence_id"),
+                            "source_type": source_type,
+                            "title": source_title,
+                            "artifact_id": recorded.get("artifact_id"),
+                            "display_name": recorded.get("display_name"),
+                            "evidence_level": "user_document",
+                        }
+                    await self._publisher.publish(
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        event_type="source.discovered",
+                        actor=actor,
+                        payload=discover_payload,
+                    )
+                    await self._publisher.publish(
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        event_type="evidence.recorded",
+                        actor=actor,
+                        payload={
+                            "evidence_id": recorded.get("evidence_id"),
+                            "source_type": source_type,
+                            "locator": recorded.get("locator"),
+                            "line_start": recorded.get("line_start"),
+                            "line_end": recorded.get("line_end"),
+                            "page": recorded.get("page"),
+                            "excerpt": (recorded.get("excerpt") or "")[:200],
+                        },
+                    )
 
             if (
                 event_type == "tool.completed"

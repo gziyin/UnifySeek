@@ -486,7 +486,7 @@ async def test_executor_kb_prefetch_injects_context_and_evidence(env, tmp_path):
     ]
     stub = _StubAgent(events)
 
-    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None):
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None, kb_budget=None):
         captured["context"] = context
         captured["knowledge_index"] = knowledge_index
         return stub
@@ -561,7 +561,7 @@ async def test_executor_kb_prefetch_filters_low_score_chunks(env, tmp_path):
     ]
     stub = _StubAgent(events)
 
-    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None):
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None, kb_budget=None):
         captured["context"] = context
         return stub
 
