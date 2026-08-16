@@ -21,7 +21,6 @@ from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.storage.paths import WorkspacePaths
 from ai_dev_researcher.tools.knowledge_base import (
     KbToolBudget,
-    record_knowledge_base_evidence_impl,
     search_knowledge_base_impl,
 )
 from ai_dev_researcher.tools.report_submitter import submit_research_report_impl
@@ -635,7 +634,16 @@ class AgentResearchExecutor:
         )
 
     async def _prefetch_knowledge(self, context: RunContext, store: EvidenceStore) -> None:
-        """Deterministically inject KB context + K evidence before model delegation."""
+        """Deterministically inject KB context before model delegation (#13/#18).
+
+        预取是启发式，其结果**不算确定性证据**（#18）：仅把高相关片段注入
+        ``context.knowledge_context`` 供模型判断「问题是否与知识库主题相关」、
+        进而决定是否委托 document-analyst。预取本身**不写证据账本、不发布
+        source.discovered / evidence.recorded**；K 证据只能经模型显式调用
+        ``record_knowledge_base_evidence`` 进入账本。
+
+        ``store`` 形参保留以维持调用点与测试 fixture 签名稳定（B2 起不再使用）。
+        """
         if not self._settings.kb_prefetch_enabled or self._knowledge_index is None:
             return
         # 超时保护：embedding 加载/检索慢或失败时（如离线缓存缺失走在线 HF 路径会
@@ -657,8 +665,8 @@ class AgentResearchExecutor:
                 context.run_id,
             )
             return
-        # 双保险：#13/#18——检索层已按 score_threshold 过滤，这里再按 score 二次过滤，
-        # 低于阈值的 chunk 视为与问题无关，不记录证据、不发布账本事件。
+        # #13/#18：检索层已按 score_threshold 过滤，这里再按 score 二次过滤，
+        # 低于阈值的 chunk 视为与问题无关，不注入上下文。预取不落账本、不发事件。
         score_threshold = self._settings.kb_prefetch_score_threshold
         lines: list[str] = []
         for rank, item in enumerate(result.get("results") or [], start=1):
@@ -671,45 +679,6 @@ class AgentResearchExecutor:
             title = item.get("symbol") or path
             line_start = int(item.get("line_start") or 0)
             line_end = int(item.get("line_end") or 0)
-            try:
-                recorded = await record_knowledge_base_evidence_impl(
-                    context=context,
-                    store=store,
-                    path=path,
-                    title=title,
-                    excerpt=excerpt,
-                    line_start=line_start,
-                    line_end=line_end,
-                )
-            except Exception:  # noqa: BLE001 - stale index chunk should not block run
-                continue
-            await self._publisher.publish(
-                session_id=context.session_id,
-                run_id=context.run_id,
-                event_type="source.discovered",
-                actor="research-orchestrator",
-                payload={
-                    "evidence_id": recorded.get("evidence_id"),
-                    "source_type": "knowledge_base",
-                    "title": title,
-                    "path": path,
-                    "evidence_level": "first_party",
-                },
-            )
-            await self._publisher.publish(
-                session_id=context.session_id,
-                run_id=context.run_id,
-                event_type="evidence.recorded",
-                actor="research-orchestrator",
-                payload={
-                    "evidence_id": recorded.get("evidence_id"),
-                    "source_type": "knowledge_base",
-                    "locator": recorded.get("locator"),
-                    "line_start": line_start,
-                    "line_end": line_end,
-                    "excerpt": excerpt[:200],
-                },
-            )
             lines.append(
                 f"[{rank}] {path}:{line_start}-{line_end} ({title})\n{excerpt[:600]}"
             )

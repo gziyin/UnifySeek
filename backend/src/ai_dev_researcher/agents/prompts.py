@@ -26,7 +26,7 @@ def build_orchestrator_prompt(context: RunContext) -> str:
 授权上传资料 artifact IDs：{uploads}
 最大网页来源数：{context.max_web_sources}
 
-本地知识库预检索片段（已确定性写入证据账本，非模型委托）：
+本地知识库预检索片段（仅供判断与知识库主题是否相关，未写入证据账本；若需引用知识库证据，必须委托 document-analyst 用 search_knowledge_base 定位后 record_knowledge_base_evidence 记录）：
 {knowledge_context or "- 无预检知识库片段"}
 
 工作流程（必须严格按顺序执行，禁止跳过）：
