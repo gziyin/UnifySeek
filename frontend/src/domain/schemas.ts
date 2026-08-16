@@ -74,12 +74,33 @@ export const ResearchClaimSchema = z
   })
   .passthrough();
 
-export const ReportSectionSchema = z
+export const ReportTableSchema = z
   .object({
-    heading: z.string(),
-    claims: z.array(ResearchClaimSchema),
+    columns: z.array(z.string()),
+    rows: z.array(z.array(z.string())),
+    citation_ids: z.array(z.string()),
   })
   .passthrough();
+
+// 递归章节（含 subsections/table）——镜像 backend domain/reports.py ReportSection。
+// 用显式 interface 承载递归（避免 z.infer 自引用环）。
+export interface ReportSectionShape {
+  heading: string;
+  claims: ResearchClaim[];
+  subsections?: ReportSectionShape[];
+  table?: ReportTable | null;
+}
+
+export const ReportSectionSchema: z.ZodType<ReportSectionShape> = z.lazy(() =>
+  z
+    .object({
+      heading: z.string(),
+      claims: z.array(ResearchClaimSchema),
+      subsections: z.array(ReportSectionSchema).optional(),
+      table: ReportTableSchema.nullable().optional(),
+    })
+    .passthrough(),
+);
 
 export const DisagreementSideSchema = z
   .object({
@@ -122,7 +143,8 @@ export type Artifact = z.infer<typeof ArtifactSchema>;
 export type Run = z.infer<typeof RunSchema>;
 export type ResearchEvent = z.infer<typeof ResearchEventSchema>;
 export type ResearchClaim = z.infer<typeof ResearchClaimSchema>;
-export type ReportSection = z.infer<typeof ReportSectionSchema>;
+export type ReportTable = z.infer<typeof ReportTableSchema>;
+export type ReportSection = ReportSectionShape;
 export type Disagreement = z.infer<typeof DisagreementSchema>;
 export type ResearchReport = z.infer<typeof ResearchReportSchema>;
 export type ReportJsonResponse = z.infer<typeof ReportJsonResponseSchema>;
