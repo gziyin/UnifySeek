@@ -28,7 +28,24 @@ def test_map_search_web_end_extracts_discovered():
     event_type, _, payload = map_framework_event(_tool_end("search_web", "r1", output))
     assert event_type == "tool.completed"
     assert payload["tool_name"] == "search_web"
-    assert payload["discovered"]["evidence_id"] == "S1"
+    assert payload["discovered_list"][0]["evidence_id"] == "S1"
+
+
+def test_map_search_web_end_collects_all_ordered_items():
+    """#26/#E：items 中所有带 evidence_id 的条目都进 discovered_list，顺序不变。"""
+    output = {
+        "items": [
+            {"evidence_id": "S1", "title": "a", "url": "https://a"},
+            {"no_id": True},  # 脏数据：无 evidence_id，应被过滤
+            {"evidence_id": "S2", "title": "b", "url": "https://b"},
+            {"evidence_id": "S3", "title": "c", "url": "https://c"},
+            {"evidence_id": "S4", "title": "d", "url": "https://d"},
+        ]
+    }
+    _, _, payload = map_framework_event(_tool_end("search_web", "r1", output))
+    discovered = payload["discovered_list"]
+    assert len(discovered) == 4
+    assert [item["evidence_id"] for item in discovered] == ["S1", "S2", "S3", "S4"]
 
 
 def test_map_submit_report_end_extracts_artifact_id():
@@ -83,14 +100,14 @@ def test_map_search_web_end_with_toolmessage_output():
     )
     raw = {"event": "on_tool_end", "name": "search_web", "run_id": "r1", "data": {"output": output}}
     _, _, payload = map_framework_event(raw)
-    assert payload["discovered"]["evidence_id"] == "S1"
+    assert payload["discovered_list"][0]["evidence_id"] == "S1"
 
 
 def test_map_tool_end_with_unparseable_output_keeps_summary_only():
     raw = {"event": "on_tool_end", "name": "search_web", "run_id": "r1", "data": {"output": "some plain error text"}}
     _, _, payload = map_framework_event(raw)
     assert payload["tool_name"] == "search_web"
-    assert "discovered" not in payload
+    assert "discovered_list" not in payload
 
 
 def test_map_unknown_event_returns_none():
@@ -115,7 +132,7 @@ def test_map_search_web_end_includes_metadata_fields():
         ]
     }
     _, _, payload = map_framework_event(_tool_end("search_web", "r1", output))
-    discovered = payload["discovered"]
+    discovered = payload["discovered_list"][0]
     assert discovered["url"] == "https://example.com/a"
     assert discovered["query"] == "deepagents"
     assert discovered["publisher_key"] == "example.com"

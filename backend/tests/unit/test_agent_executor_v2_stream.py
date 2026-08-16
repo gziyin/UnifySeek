@@ -130,6 +130,53 @@ async def test_executor_v2_stream_success_path(env):
 
 
 @pytest.mark.asyncio
+async def test_executor_search_web_publishes_all_discovered_items(env):
+    """#26/#E：一次 search_web 返回 3 条 items → 恰 3 组 source.discovered(web) +
+    3 组 evidence.recorded，evidence_id 集合一致（不再 last-wins 只留最后一条）。"""
+    settings, conn, session, run, publisher, executor = env
+    events = [
+        _tool_start("search_web", "r1", {"query": "DeepAgents"}),
+        _tool_end(
+            "search_web",
+            "r1",
+            {
+                "items": [
+                    {"evidence_id": "S1", "title": "a", "url": "https://a", "evidence_level": "search_snippet"},
+                    {"evidence_id": "S2", "title": "b", "url": "https://b", "evidence_level": "search_snippet"},
+                    {"evidence_id": "S3", "title": "c", "url": "https://c", "evidence_level": "search_snippet"},
+                ]
+            },
+        ),
+        _tool_start("submit_research_report", "r2", {"title": "t"}),
+        _tool_end("submit_research_report", "r2", {"artifact_id": ARTIFACT_ID, "title": "t"}),
+    ]
+    stub = _StubAgent(events)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+
+    db_events = await EventRepository(conn).list_after(run.run_id, 0)
+    web_discovered = [
+        e
+        for e in db_events
+        if e.type == "source.discovered" and e.payload.get("source_type") == "web"
+    ]
+    web_recorded = [
+        e
+        for e in db_events
+        if e.type == "evidence.recorded" and e.payload.get("source_type") == "web"
+    ]
+    assert len(web_discovered) == 3
+    assert len(web_recorded) == 3
+    assert {e.payload.get("evidence_id") for e in web_discovered} == {"S1", "S2", "S3"}
+    assert {e.payload.get("evidence_id") for e in web_recorded} == {"S1", "S2", "S3"}
+
+
+@pytest.mark.asyncio
 async def test_executor_v2_stream_degraded_path(env):
     """降级报告：run 应 FAILED 但保留 artifact_id。"""
     settings, conn, session, run, publisher, executor = env

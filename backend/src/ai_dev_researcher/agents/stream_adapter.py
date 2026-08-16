@@ -69,9 +69,16 @@ def map_framework_event(raw: dict[str, Any]) -> tuple[EventType | None, str, dic
         }
         result = _coerce_tool_output(output)
         if tool_name == "search_web" and result is not None:
-            for item in result.get("items", []):
-                if isinstance(item, dict) and item.get("evidence_id"):
-                    payload["discovered"] = item
+            # #26/#E：保留全部带 evidence_id 的条目（维持原顺序），供 executor
+            # 逐条发布 source.discovered / evidence.recorded，避免 last-wins 覆盖
+            # 只留最后一条导致前端账本条数偏小。空列表时不设该键。
+            discovered_list = [
+                item
+                for item in result.get("items", [])
+                if isinstance(item, dict) and item.get("evidence_id")
+            ]
+            if discovered_list:
+                payload["discovered_list"] = discovered_list
         if tool_name in {"record_document_evidence", "record_knowledge_base_evidence"} and result is not None:
             payload["recorded"] = result
         if tool_name == "submit_research_report" and result is not None:

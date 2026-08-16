@@ -486,36 +486,38 @@ class AgentResearchExecutor:
                     payload.get("tool_call_id", ""), ""
                 )
 
-            if event_type == "tool.completed" and payload.get("discovered"):
-                discovered = payload["discovered"]
-                await self._publisher.publish(
-                    session_id=run.session_id,
-                    run_id=run.run_id,
-                    event_type="source.discovered",
-                    actor="web-researcher",
-                    payload={
-                        "evidence_id": discovered.get("evidence_id"),
-                        "source_type": "web",
-                        "title": discovered.get("title"),
-                        "url": discovered.get("url"),
-                        "query": discovered.get("query"),
-                        "publisher_key": discovered.get("publisher_key"),
-                        "result_rank": discovered.get("result_rank"),
-                        "evidence_level": discovered.get("evidence_level", "search_snippet"),
-                    },
-                )
-                await self._publisher.publish(
-                    session_id=run.session_id,
-                    run_id=run.run_id,
-                    event_type="evidence.recorded",
-                    actor="web-researcher",
-                    payload={
-                        "evidence_id": discovered.get("evidence_id"),
-                        "source_type": "web",
-                        "locator": discovered.get("url"),
-                        "excerpt": discovered.get("snippet"),
-                    },
-                )
+            if event_type == "tool.completed" and payload.get("discovered_list"):
+                # #26/#E：search_web 可能一次返回多条结果，逐条发布账本事件，
+                # 避免 last-wins 覆盖导致前端账本只记最后一条。
+                for discovered in payload["discovered_list"]:
+                    await self._publisher.publish(
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        event_type="source.discovered",
+                        actor="web-researcher",
+                        payload={
+                            "evidence_id": discovered.get("evidence_id"),
+                            "source_type": "web",
+                            "title": discovered.get("title"),
+                            "url": discovered.get("url"),
+                            "query": discovered.get("query"),
+                            "publisher_key": discovered.get("publisher_key"),
+                            "result_rank": discovered.get("result_rank"),
+                            "evidence_level": discovered.get("evidence_level", "search_snippet"),
+                        },
+                    )
+                    await self._publisher.publish(
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        event_type="evidence.recorded",
+                        actor="web-researcher",
+                        payload={
+                            "evidence_id": discovered.get("evidence_id"),
+                            "source_type": "web",
+                            "locator": discovered.get("url"),
+                            "excerpt": discovered.get("snippet"),
+                        },
+                    )
 
             if event_type == "tool.completed" and payload.get("recorded"):
                 recorded = payload["recorded"]
@@ -609,7 +611,7 @@ class AgentResearchExecutor:
                 run_id=run.run_id,
                 event_type=event_type,
                 actor=actor,
-                payload={k: v for k, v in payload.items() if k not in {"discovered", "recorded"}},
+                payload={k: v for k, v in payload.items() if k not in {"discovered", "discovered_list", "recorded"}},
             )
 
             budget_reason = _budget_reason_at(time.monotonic())
