@@ -13,6 +13,8 @@ from ai_dev_researcher.tools.document_reader import (
     search_run_documents_impl,
 )
 from ai_dev_researcher.tools.knowledge_base import (
+    KB_BUDGET_EXHAUSTED_GUIDANCE,
+    KbToolBudget,
     list_knowledge_base_entries_impl,
     read_knowledge_base_file_impl,
     record_knowledge_base_evidence_impl,
@@ -62,7 +64,17 @@ def create_document_tools(
     artifacts: ArtifactRepository,
     vector_store=None,
     knowledge_index=None,
+    kb_budget: KbToolBudget | None = None,
 ) -> list[StructuredTool]:
+    def _kb_blocked() -> dict | None:
+        """Return a short-circuit payload when the KB soft budget is exhausted."""
+        if kb_budget is None or kb_budget.acquire():
+            return None
+        return {
+            "note": "budget_exceeded",
+            "guidance": KB_BUDGET_EXHAUSTED_GUIDANCE,
+        }
+
     async def list_run_documents() -> dict:
         return await list_run_documents_impl(context=context, artifacts=artifacts)
 
@@ -96,9 +108,15 @@ def create_document_tools(
         )
 
     async def list_knowledge_base_entries(path: str = ".") -> dict:
+        blocked = _kb_blocked()
+        if blocked is not None:
+            return {"entries": [], **blocked}
         return await list_knowledge_base_entries_impl(context=context, path=path)
 
     async def read_knowledge_base_file(path: str, offset: int = 0, limit: int = 4000) -> dict:
+        blocked = _kb_blocked()
+        if blocked is not None:
+            return {"path": path, "text": "", **blocked}
         return await read_knowledge_base_file_impl(
             context=context,
             path=path,
@@ -113,6 +131,9 @@ def create_document_tools(
         line_start: int,
         line_end: int,
     ) -> dict:
+        blocked = _kb_blocked()
+        if blocked is not None:
+            return blocked
         return await record_knowledge_base_evidence_impl(
             context=context,
             store=store,
@@ -141,13 +162,21 @@ def create_document_tools(
         query: str,
         path: str | None = None,
         top_k: int = 10,
-        score_threshold: float = 0.0,
+        score_threshold: float | None = None,
     ) -> dict:
+        blocked = _kb_blocked()
+        if blocked is not None:
+            return {"results": [], "count": 0, **blocked}
+        # 默认阈值与预取一致（settings.kb_prefetch_score_threshold，默认 0.3）；
+        # 显式传值时钳制下界，防止模型传 0 绕过相关性过滤（#13）。
+        threshold = context.settings.kb_prefetch_score_threshold
+        if score_threshold is not None:
+            threshold = max(float(score_threshold), threshold)
         return await search_knowledge_base_impl(
             query=query,
             path=path,
             top_k=top_k,
-            score_threshold=score_threshold,
+            score_threshold=threshold,
             knowledge_index=knowledge_index,
         )
 

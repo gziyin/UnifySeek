@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     # KB 预取相关性阈值：低于该分数的 chunk 视为与问题无关，不记录证据、
     # 不发布 source.discovered/evidence.recorded（不污染来源账本）。可由 .env 覆盖。
     kb_prefetch_score_threshold: float = 0.3
+    # KB 软预算：单次 run 内 KB 类工具（search/read/list/record_knowledge_base_*）
+    # 调用上限。超过后后续 KB 工具短路返回空结果 + 引导提示（不触发全局
+    # BUDGET_EXCEEDED）。0 表示不限制。可由 .env（KB_MAX_TOOL_CALLS）覆盖。
+    kb_max_tool_calls: int = 12
 
     # Phase-1 vertical slice uses a fake executor until DeepAgents is wired.
     fake_agent_mode: bool = True

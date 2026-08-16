@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SUPPORTED_KB_EXTENSIONS = {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".toml"}
+
+KB_BUDGET_EXHAUSTED_GUIDANCE = "知识库已充分检索或不相关，请转向网页/上传文档证据。"
+
+
+@dataclass
+class KbToolBudget:
+    """Run-scoped soft budget for KB tools (#13).
+
+    Counts model-invoked KB tool calls (search/read/list/record_knowledge_base_*).
+    ``limit == 0`` means unlimited. Prefetch does not go through the tool wrappers,
+    so it is never counted here.
+    """
+
+    limit: int
+    remaining: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.remaining = self.limit
+
+    def acquire(self) -> bool:
+        if self.limit <= 0:
+            return True
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
 
 # Deprecated compatibility API for out-of-domain tests. Production wiring now
 # passes the index explicitly through factory/executor; new code should not

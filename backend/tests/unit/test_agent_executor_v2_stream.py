@@ -22,7 +22,8 @@ from ai_dev_researcher.services.event_publisher import EventPublisher
 from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.storage.knowledge_index import KbChunk
 from ai_dev_researcher.storage.paths import WorkspacePaths
-from ai_dev_researcher.tools.knowledge_base import search_knowledge_base_impl
+from ai_dev_researcher.tools.factory import create_document_tools
+from ai_dev_researcher.tools.knowledge_base import KbToolBudget, search_knowledge_base_impl
 
 
 def _tool_start(name: str, run_id: str, input_: dict) -> dict:
@@ -452,8 +453,8 @@ async def test_executor_preserves_interrupted_when_failure_occurs_mid_run(env):
 
 
 @pytest.mark.asyncio
-async def test_executor_kb_prefetch_injects_context_and_evidence(env, tmp_path):
-    """KB 兜底：不依赖模型委托，确定性检索并写入 K 类证据与 orchestrator 上下文。"""
+async def test_executor_kb_prefetch_injects_context_without_k_evidence(env, tmp_path):
+    """B2/#18：预取命中只注入 knowledge_context；不写 K 证据、不发 KB 账本事件。"""
     settings, conn, session, run, publisher, executor = env
     kb_root = tmp_path / "kb"
     kb_root.mkdir(parents=True)
@@ -486,7 +487,7 @@ async def test_executor_kb_prefetch_injects_context_and_evidence(env, tmp_path):
     ]
     stub = _StubAgent(events)
 
-    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None):
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None, kb_budget=None):
         captured["context"] = context
         captured["knowledge_index"] = knowledge_index
         return stub
@@ -501,8 +502,10 @@ async def test_executor_kb_prefetch_injects_context_and_evidence(env, tmp_path):
     assert updated is not None
     assert updated.status == RunStatus.SUCCEEDED
     assert captured["knowledge_index"] is fake_index
+    # 1) 预取上下文：高相关片段仍注入 knowledge_context。
     assert "notes.md" in captured["context"].knowledge_context
 
+    # 2) B2/#18：预取不落账本 —— 账本 0 条 K 证据。
     store = EvidenceStore(
         run_id=run.run_id,
         session_id=run.session_id,
@@ -510,16 +513,24 @@ async def test_executor_kb_prefetch_injects_context_and_evidence(env, tmp_path):
         paths=paths_for_test(settings),
     )
     ledger = await store.list_for_run()
-    assert any(item.source_type == "knowledge_base" for item in ledger)
+    assert not any(item.source_type == "knowledge_base" for item in ledger)
 
-    types = await _event_types(conn, run.run_id)
-    assert "source.discovered" in types
-    assert "evidence.recorded" in types
+    # 3) 无 KB 账本事件（source.discovered / evidence.recorded，source_type=knowledge_base）。
+    db_events = await EventRepository(conn).list_after(run.run_id, 0)
+    assert not any(
+        e.type == "source.discovered" and e.payload.get("source_type") == "knowledge_base"
+        for e in db_events
+    )
+    assert not any(
+        e.type == "evidence.recorded" and e.payload.get("source_type") == "knowledge_base"
+        for e in db_events
+    )
 
 
 @pytest.mark.asyncio
 async def test_executor_kb_prefetch_filters_low_score_chunks(env, tmp_path):
-    """#13/#18：低于 kb_prefetch_score_threshold 的 KB chunk 不记录证据、不发布账本事件。"""
+    """#13/#18：低于 kb_prefetch_score_threshold 的 KB chunk 不注入上下文；
+    B2/#18：预取无论高低分均不落账本、不发 KB 账本事件。"""
     settings, conn, session, run, publisher, executor = env
     kb_root = tmp_path / "kb"
     kb_root.mkdir(parents=True)
@@ -561,7 +572,7 @@ async def test_executor_kb_prefetch_filters_low_score_chunks(env, tmp_path):
     ]
     stub = _StubAgent(events)
 
-    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None):
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None, kb_budget=None):
         captured["context"] = context
         return stub
 
@@ -580,7 +591,7 @@ async def test_executor_kb_prefetch_filters_low_score_chunks(env, tmp_path):
     assert "high.md" in ctx
     assert "low.md" not in ctx
 
-    # 2) 账本：只有高分 chunk 记录为 knowledge_base 证据，低分 chunk 不入账本。
+    # 2) B2/#18：预取不落账本 —— 高低分 chunk 均不入账本（0 条 K 证据）。
     store = EvidenceStore(
         run_id=run.run_id,
         session_id=run.session_id,
@@ -588,20 +599,103 @@ async def test_executor_kb_prefetch_filters_low_score_chunks(env, tmp_path):
         paths=paths_for_test(settings),
     )
     ledger = await store.list_for_run()
-    kb_locs = [item.locator for item in ledger if item.source_type == "knowledge_base"]
-    assert any("high.md" in loc for loc in kb_locs)
-    assert not any("low.md" in loc for loc in kb_locs)
+    assert not any(item.source_type == "knowledge_base" for item in ledger)
 
-    # 3) 账本事件：仅高分 chunk 发布 source.discovered，低分 chunk 不发布。
-    kb_discovered_paths = [
-        str(e.payload.get("path", ""))
-        for e in await EventRepository(conn).list_after(run.run_id, 0)
-        if e.type == "source.discovered"
-        and e.payload.get("source_type") == "knowledge_base"
+    # 3) 无 KB 账本事件（source.discovered / evidence.recorded，source_type=knowledge_base）。
+    db_events = await EventRepository(conn).list_after(run.run_id, 0)
+    assert not any(
+        e.type == "source.discovered" and e.payload.get("source_type") == "knowledge_base"
+        for e in db_events
+    )
+    assert not any(
+        e.type == "evidence.recorded" and e.payload.get("source_type") == "knowledge_base"
+        for e in db_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_prefetch_not_ledger_but_model_record_writes_k(env, tmp_path):
+    """B2/#18：预取命中只注入上下文（不落账本）；模型显式经
+    record_knowledge_base_evidence 记录后才把 K 证据写入账本。"""
+    settings, conn, session, run, publisher, executor = env
+    kb_root = tmp_path / "kb"
+    kb_root.mkdir(parents=True)
+    (kb_root / "notes.md").write_text(
+        "# Notes\n\nDeepAgents uses explicit graph orchestration with subagents.\n",
+        encoding="utf-8",
+    )
+    settings.knowledge_base_root = kb_root
+    executor._knowledge_index = _FakeKnowledgeIndex(
+        [
+            {
+                "file_path": "notes.md",
+                "symbol": "orchestration",
+                "parent_symbol": "",
+                "kind": "doc",
+                "line_start": 1,
+                "line_end": 3,
+                "score": 0.9,
+                "text": "DeepAgents uses explicit graph orchestration with subagents.",
+            }
+        ]
+    )
+    captured = {}
+    events = [
+        _tool_start("search_web", "r1", {"query": "DeepAgents"}),
+        _tool_end("search_web", "r1", {"items": [{"evidence_id": "S1", "title": "DeepAgents", "url": "https://x"}]}),
+        _tool_start("submit_research_report", "r2", {"title": "t"}),
+        _tool_end("submit_research_report", "r2", {"artifact_id": ARTIFACT_ID, "title": "t"}),
     ]
-    assert kb_discovered_paths  # 至少发布了一条（high.md）
-    assert all("high.md" in p for p in kb_discovered_paths)
-    assert not any("low.md" in p for p in kb_discovered_paths)
+    stub = _StubAgent(events)
+
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None, kb_budget=None):
+        captured["context"] = context
+        return stub
+
+    with patch(
+        "ai_dev_researcher.services.agent_executor.create_research_agent",
+        side_effect=_fake_create,
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    context = captured["context"]
+    assert "notes.md" in context.knowledge_context
+
+    store = EvidenceStore(
+        run_id=run.run_id,
+        session_id=run.session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=paths_for_test(settings),
+    )
+    # 预取阶段：账本无 K 证据。
+    assert not any(item.source_type == "knowledge_base" for item in await store.list_for_run())
+
+    # 模型确认相关 → 经工具显式记录 → K 证据进账本。
+    tools = {
+        t.name: t
+        for t in create_document_tools(
+            context,
+            store=store,
+            artifacts=object(),
+            knowledge_index=executor._knowledge_index,
+            kb_budget=KbToolBudget(12),
+        )
+    }
+    result = await tools["record_knowledge_base_evidence"].ainvoke(
+        {
+            "path": "notes.md",
+            "title": "orchestration",
+            "excerpt": "DeepAgents uses explicit graph orchestration with subagents.",
+            "line_start": 1,
+            "line_end": 3,
+        }
+    )
+    assert result["evidence_id"].startswith("K")
+    ledger = await store.list_for_run()
+    assert any(item.source_type == "knowledge_base" for item in ledger)
 
 
 @pytest.mark.asyncio
