@@ -24,7 +24,7 @@
 ### 手动启动
 
 ```powershell
-cd d:\code\Projects\DeepSearch_Agent\ai_dev_researcher\backend
+cd d:\code\Projects\DeepSearch_Agent\UnifySeek\backend
 .venv\Scripts\python.exe -m ai_dev_researcher.main
 ```
 
@@ -33,7 +33,7 @@ cd d:\code\Projects\DeepSearch_Agent\ai_dev_researcher\backend
 ### 前端
 
 ```powershell
-cd d:\code\Projects\DeepSearch_Agent\ai_dev_researcher\frontend
+cd d:\code\Projects\DeepSearch_Agent\UnifySeek\frontend
 npm install
 npm run dev
 ```
@@ -43,7 +43,7 @@ npm run dev
 ### 测试
 
 ```powershell
-cd d:\code\Projects\DeepSearch_Agent\ai_dev_researcher\backend
+cd d:\code\Projects\DeepSearch_Agent\UnifySeek\backend
 .venv\Scripts\python.exe -m pytest tests/unit tests/e2e tests/integration -q
 ```
 
