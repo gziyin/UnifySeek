@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   ApiError,
   cancelRun,
@@ -14,6 +14,7 @@ import {
 } from "../api/client";
 import type { Artifact, ResearchReport, Run } from "../domain/schemas";
 import { ResearchEventSchema } from "../domain/schemas";
+import { extractCitedEvidenceIds } from "../domain/reportCites";
 import { Background, readBgChoice } from "../components/Background";
 import { TopBar } from "../components/TopBar";
 import { MODE_MAX_SOURCES, QueryCard, type ResearchMode } from "../components/QueryCard";
@@ -252,6 +253,13 @@ export function ResearchWorkbench() {
     };
   }, [reportArtifactId]);
 
+  // 批次D：报告终态后才拉到 reportJson（进行中为 null）。抽取「被引用证据」有序列表
+  // 下传给账本，主视图与报告 Sources 严格对齐；未就绪时为空数组 → Ledger 回退全量。
+  const citedIds = useMemo(
+    () => (reportJson ? extractCitedEvidenceIds(reportJson) : []),
+    [reportJson],
+  );
+
   const handleUpload = useCallback(
     async (file: File) => {
       if (!sessionId) {
@@ -438,7 +446,7 @@ export function ResearchWorkbench() {
               </div>
             ) : null}
 
-            <Ledger sources={view.sources} />
+            <Ledger sources={view.sources} citedIds={citedIds} />
 
             <div className="examples-label">试试这些例子 →</div>
             <div className="examples">
