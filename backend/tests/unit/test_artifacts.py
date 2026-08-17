@@ -138,8 +138,8 @@ def test_render_aggregated_sources_order():
     assert "*来源：[1][2][3][4]*" in md
 
 
-def test_render_summary_truncated_when_long():
-    """核心结论超长时截断并补省略号，不产生未闭合 ** 标记。"""
+def test_render_summary_within_cap_renders_full_with_bold():
+    """核心结论未超上限（≤200）时原样渲染（含粗体），不追加省略号（#43，批次 F）。"""
     report = ResearchReport(
         title="t",
         executive_summary_claim_ids=["LONG"],
@@ -151,16 +151,39 @@ def test_render_summary_truncated_when_long():
         ],
         recommendations=[_claim("CR", ["S1"], "medium")],
     )
-    long_statement = "这是一段**非常长的核心结论**" + "内容" * 60
+    long_statement = "这是一段**非常长的核心结论**" + "内容" * 60  # 清洗后约 133 < 200
     report.sections[0].claims[0].statement = long_statement
     md = render_report_markdown(report, collect_claims(report), _evidence_map())
     assert "## 核心结论" in md
-    assert "…" in md
-    # 正文 section 仍保留完整 statement（含粗体）；仅核心结论需截断
-    assert long_statement in md
-    # 核心结论段落（截断后）不得残留未闭合 **
+    assert "…" not in md
+    assert long_statement in md  # 正文 section 仍完整渲染
     core_block = md.split("## 核心结论", 1)[1].split("## ", 1)[0]
-    assert "**" not in core_block
+    assert long_statement in core_block  # 核心结论原样保留（含粗体）
+    assert "**非常长的核心结论**" in core_block
+
+
+def test_render_summary_over_cap_cuts_sentence_boundary_no_ellipsis():
+    """核心结论超上限（>200）时按句边界截断、不补省略号、截断段去强调（#43，批次 F）。"""
+    report = ResearchReport(
+        title="t",
+        executive_summary_claim_ids=["LONG"],
+        sections=[
+            ReportSection(
+                heading="H",
+                claims=[_claim("LONG", ["S1"], "medium")],
+            )
+        ],
+        recommendations=[_claim("CR", ["S1"], "medium")],
+    )
+    long_statement = "**超长**：第一句完整结论。" + ("后续内容非常长。" * 60)  # 远超 200
+    report.sections[0].claims[0].statement = long_statement
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    assert "…" not in md
+    assert long_statement in md  # 正文 section 仍是完整原文（含粗体）
+    core_block = md.split("## 核心结论", 1)[1].split("## ", 1)[0]
+    para = core_block.strip().split("\n\n*来源")[0].strip()
+    assert para.endswith("。")
+    assert "**" not in core_block  # 核心结论截断段去强调，无未闭合标记
 
 
 def test_collect_claims_recurses_into_subsections():

@@ -170,3 +170,12 @@ async def test_submit_tool_rejects_invalid_payload(env):
     bad = {**_VALID_PAYLOAD, "recommendations": []}
     with pytest.raises(Exception):
         await tool.ainvoke(bad)
+
+
+@pytest.mark.asyncio
+async def test_summary_claims_description_enforces_full_sentences(env):
+    """#43（批次 F）：summary_claims 字段描述强化「完整句子 / 禁用省略号」措辞。"""
+    tool = await _submit_tool(env)
+    desc = tool.args["summary_claims"]["description"]
+    for token in ["完整自洽的句子", "**粗体**", "≤120 字", "禁止使用省略号", "…", "半句"]:
+        assert token in desc
