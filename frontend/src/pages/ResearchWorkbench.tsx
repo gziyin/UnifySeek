@@ -23,6 +23,7 @@ import { ReportCard } from "../components/ReportCard";
 import { Ledger } from "../components/Ledger";
 import { HistoryDrawer } from "../components/HistoryDrawer";
 import { initialRunViewState, runEventReducer } from "../state/runEventReducer";
+import { deriveStageVisibility } from "./stageVisibility";
 
 const SESSION_KEY = "ai_dev_researcher.session_id";
 const BG_KEY = "unifyseek.bg";
@@ -319,10 +320,12 @@ export function ResearchWorkbench() {
   }, [run]);
 
   // ---- 历史抽屉恢复：设置会话与 run，由 run?.run_id effect 自动重连 WS / 拉报告 ----
+  // #48：恢复动作视为显式覆盖用户当前输入，回填该 run 的原问题。
   const handleRestore = useCallback(
     ({ sessionId: sid, run: restored }: { sessionId: string; run: Run }) => {
       setSessionId(sid);
       setRun(restored);
+      setQuestion(restored.question);
       dispatch({ type: "reset" });
       setReportMarkdown("");
       setReportJson(null);
@@ -377,11 +380,15 @@ export function ResearchWorkbench() {
     localStorage.setItem(BG_KEY, String(choice));
   }, []);
 
-  const active =
-    run?.status === "pending" || run?.status === "running" || run?.status === "cancelling";
-  const reportReady = Boolean(reportArtifactId);
-  const stageClass =
-    (run ? " stage-running" : "") + (reportReady ? " stage-report" : "");
+  // ---- 起始页阶段化显隐（#47）----
+  // phasesAdvanced：view.phases 任一阶段非 pending 即视为「阶段有推进」
+  // （optimisticStart / 任意阶段事件 / hydrate 灌入后为 true，reset 后回 false）。
+  const phasesAdvanced = view.phases.some((p) => p.status !== "pending");
+  const { active, showExamples, stageClass } = deriveStageVisibility({
+    run,
+    reportArtifactId,
+    phasesAdvanced,
+  });
 
   return (
     <>
@@ -448,19 +455,23 @@ export function ResearchWorkbench() {
 
             <Ledger sources={view.sources} citedIds={citedIds} />
 
-            <div className="examples-label">试试这些例子 →</div>
-            <div className="examples">
-              {EXAMPLES.map((example) => (
-                <button
-                  key={example.label}
-                  type="button"
-                  className="example-tag"
-                  onClick={() => setQuestion(example.text)}
-                >
-                  {example.label}
-                </button>
-              ))}
-            </div>
+            {showExamples ? (
+              <>
+                <div className="examples-label">试试这些例子 →</div>
+                <div className="examples">
+                  {EXAMPLES.map((example) => (
+                    <button
+                      key={example.label}
+                      type="button"
+                      className="example-tag"
+                      onClick={() => setQuestion(example.text)}
+                    >
+                      {example.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : null}
 
             <p className="footer-note">UnifySeek 可能会出错 · 所有结论请结合原始来源核验</p>
           </div>
