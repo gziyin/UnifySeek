@@ -762,6 +762,7 @@ class AgentResearchExecutor:
             session_id=context.session_id,
             run_id=context.run_id,
             report_data=report_data,
+            system_generated=True,
         )
         return str(result["artifact_id"])
 
