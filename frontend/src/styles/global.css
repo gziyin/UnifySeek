@@ -854,7 +854,9 @@ code,
   background: rgba(255, 255, 255, 0.6);
   border-radius: 12px;
   padding: 1rem 1.25rem;
-  max-height: 360px;
+  /* #46：可视展示高度约为原 360px 的 2 倍（桌面 720px），clamp 上限防短屏溢出；
+     仅改静态值不加 transition，避免展开动画的高度突变 layout shift。 */
+  max-height: clamp(360px, 70vh, 720px);
   overflow-y: auto;
   line-height: 1.7;
   color: var(--steel);
