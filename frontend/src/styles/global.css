@@ -443,28 +443,30 @@ code,
 }
 
 /* ============ 时间线卡片 ============ */
+/* #47：折叠卡片彻底隐藏——容器 display:none（无玻璃盒残影），
+   展开职责由容器 display + card-slide-in 入场动画承担（原内层 grid 0fr 折叠废弃）。 */
 .timeline-card {
-  pointer-events: none;
+  display: none;
+}
+.stage-running .timeline-card {
+  display: block;
+  animation: card-slide-in 0.6s var(--ease) both;
 }
 .timeline-expand {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transform: translateY(20px);
-  transition: grid-template-rows 0.6s var(--ease) 0.2s, opacity 0.5s ease 0.25s,
-    transform 0.6s var(--ease) 0.2s;
+  display: block;
 }
 .timeline-expand-inner {
   min-height: 0;
-  overflow: hidden;
 }
-.stage-running .timeline-card {
-  pointer-events: auto;
-}
-.stage-running .timeline-expand {
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transform: translateY(0);
+@keyframes card-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .timeline-header {
@@ -781,28 +783,19 @@ code,
 }
 
 /* ============ 报告卡片 ============ */
+/* #47：报告卡同时间线——容器彻底隐藏 + 入场动画（内层折叠废弃）。 */
 .report-card {
-  pointer-events: none;
+  display: none;
 }
 .stage-report .report-card {
-  pointer-events: auto;
+  display: block;
+  animation: card-slide-in 0.6s var(--ease) 0.1s both;
 }
 .report-expand {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transform: translateY(-10px) scale(0.98);
-  transition: grid-template-rows 0.7s var(--ease) 0.1s, opacity 0.6s ease 0.15s,
-    transform 0.7s var(--ease) 0.1s;
+  display: block;
 }
 .report-expand-inner {
   min-height: 0;
-  overflow: hidden;
-}
-.stage-report .report-expand {
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transform: translateY(0) scale(1);
 }
 .report-card {
   border: 2px solid rgba(30, 90, 122, 0.25);
@@ -1047,16 +1040,13 @@ code,
   margin-bottom: 0.3rem;
 }
 
-/* ============ 来源账本（下方折叠） ============ */
+/* ============ 来源账本（#47：容器彻底隐藏 + 入场） ============ */
 .ledger-section {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transition: grid-template-rows 0.5s var(--ease), opacity 0.4s ease;
+  display: none;
 }
 .stage-report .ledger-section {
-  grid-template-rows: 1fr;
-  opacity: 1;
+  display: block;
+  animation: card-slide-in 0.5s ease 0.2s both;
 }
 .ledger-inner {
   min-height: 0;
