@@ -136,6 +136,13 @@ function phaseForEvent(event: ResearchEvent): PhaseKey | null {
     (event.payload as { tool_name?: string }).tool_name === "submit_research_report"
   )
     return "report";
+  // #45：submit 工具 started 即进入报告阶段（research 在同一 ts 冻结），
+  // 使 report.startedAt 锚定「开始提交」而非「提交完成」，三阶段无缝拼接。
+  if (
+    type === "tool.started" &&
+    (event.payload as { tool_name?: string }).tool_name === "submit_research_report"
+  )
+    return "report";
   if (
     type === "agent.started" ||
     type === "agent.completed" ||
