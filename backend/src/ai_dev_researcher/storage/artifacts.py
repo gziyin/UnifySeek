@@ -56,16 +56,31 @@ def _build_numbering(
     return {cid: i + 1 for i, cid in enumerate(order)}
 
 
-_REFINE_SUMMARY_MAX_CHARS = 120
+_REFINE_SUMMARY_MAX_CHARS = 200
+
+_SENTENCE_END = "。！？!?"
+_CLAUSE_END = "；;、，,:："
 
 
 def _truncate_summary(text: str, limit: int = _REFINE_SUMMARY_MAX_CHARS) -> str:
-    """核心结论精炼：先剥掉 markdown 强调/代码标记（避免截断留下未闭合 **），
-    超限则截到 limit 并补省略号，未超限原样返回（保留粗体）。"""
+    """核心结论精炼：先剥掉 markdown 强调/代码标记用于度量；
+    未超限则原样返回（保留粗体）；超限则按「句末标点 → 分句/词边界 → 硬切」截断，
+    不追加省略号，避免半词/半句与未闭合 ** 标记（#43）。"""
     cleaned = text.replace("**", "").replace("`", "").replace("*", "")
     if len(cleaned) <= limit:
         return text
-    return cleaned[:limit].rstrip() + "…"
+    window = cleaned[:limit]
+    cut = -1
+    for class_ in (_SENTENCE_END, _CLAUSE_END):
+        idx = max(window.rfind(ch) for ch in class_)
+        if idx != -1:
+            cut = idx + 1
+            break
+    if cut == -1:
+        idx = window.rfind(" ")
+        cut = idx + 1 if idx != -1 else limit
+    out = window[:cut].rstrip()
+    return out if out else cleaned[:limit].rstrip()
 
 
 def _render_sources_line(

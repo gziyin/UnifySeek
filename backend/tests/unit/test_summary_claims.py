@@ -14,7 +14,13 @@ from ai_dev_researcher.repositories.evidence import EvidenceRepository
 from ai_dev_researcher.repositories.sessions import SessionRepository
 from ai_dev_researcher.repositories.sqlite import connect, init_db
 from ai_dev_researcher.services.evidence_store import EvidenceStore
-from ai_dev_researcher.storage.artifacts import _build_numbering, collect_claims, render_report_markdown
+from ai_dev_researcher.storage.artifacts import (
+    _REFINE_SUMMARY_MAX_CHARS,
+    _build_numbering,
+    _truncate_summary,
+    collect_claims,
+    render_report_markdown,
+)
 from ai_dev_researcher.storage.paths import WorkspacePaths
 from ai_dev_researcher.tools.report_submitter import submit_research_report_impl
 
@@ -289,3 +295,151 @@ async def test_degraded_data_default_still_degrades(env):
     )
     assert result["degraded"] is True
     assert "unknown summary claim" in (result["reason"] or "")
+
+
+# ---- 用例 12+：核心结论渲染截断稳定性（#43，批次 F）----
+
+_OBSERVED_SUMMARY_STATEMENTS = [
+    "DeepSeek Harness 与主流 code agent 的根本区别在于架构哲学：它不是固定工作流产品，而是基于 Cordis、将模型/工具/技能/会话/沙箱全部插件化并模型无关的开源运行时，本质上更接近「harness 基础设施」而非开箱即用产品。",
+    "成熟度决定了两者适用场景分化：DeepSeek Harness 是预期有 breaking changes 的 developer preview，生态与稳定性不及 Claude Code/Codex，但其 MIT 开源与首日 2.4 万 star 热度，承载了「低成本规模化运行 agent」的战略意图。",
+    "基准成绩是「模型+harness」的复合结果：DeepSeek V4 Pro Max 在 LiveCodeBench 领先且成本约低 28 倍，SWE-bench Pro 仍由 Claude 系占优，任何跨 agent 对比都应把 harness 视为独立评测变量。",
+]
+
+
+def _core_block(md: str) -> str:
+    return md.split("## 核心结论", 1)[1].split("## ", 1)[0]
+
+
+def _summary_report(statements: list[str], cids: list[str]) -> ResearchReport:
+    return ResearchReport(
+        title="t",
+        summary_claims=[
+            ResearchClaim(
+                id=f"SUM{i}",
+                statement=s,
+                citation_ids=[cid],
+                confidence="medium",
+            )
+            for i, (s, cid) in enumerate(zip(statements, cids), 1)
+        ],
+        sections=[],
+        recommendations=[_claim("CR", ["S1"])],
+    )
+
+
+def test_truncate_summary_within_limit_preserves_original_and_bold():
+    text = "**关键结论**：一段不长于上限的完整句子。"
+    assert len(text.replace("**", "")) <= _REFINE_SUMMARY_MAX_CHARS
+    assert _truncate_summary(text) == text
+
+
+def test_truncate_summary_cuts_at_sentence_boundary_without_ellipsis():
+    text = "第一句完整结论。" + ("第二句内容很长。" * 60)
+    out = _truncate_summary(text, 20)
+    assert out.endswith("。")
+    assert "…" not in out
+    assert len(out) <= 20
+
+
+def test_truncate_summary_cuts_at_clause_boundary_without_ellipsis():
+    text = "第一分句，第二分句，第三分句。" + ("内容" * 200)
+    out = _truncate_summary(text, 10)
+    assert out.endswith("，")
+    assert "…" not in out
+    assert len(out) <= 10
+
+
+def test_truncate_summary_cuts_at_word_boundary_fallback():
+    text = "alpha beta " * 60
+    out = _truncate_summary(text, 20)
+    assert out == "alpha beta alpha"
+    assert "…" not in out
+
+
+def test_truncate_summary_hard_cut_has_no_ellipsis():
+    text = "字" * 300
+    out = _truncate_summary(text, 200)
+    assert "…" not in out
+    assert len(out) == 200
+
+
+def test_truncate_summary_observed_claims_render_full():
+    for statement in _OBSERVED_SUMMARY_STATEMENTS:
+        assert "…" not in statement
+        assert _truncate_summary(statement) == statement
+
+
+def test_render_summary_claims_observed_full_and_no_ellipsis():
+    report = _summary_report(_OBSERVED_SUMMARY_STATEMENTS, ["S1", "S2", "S3"])
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    core = _core_block(md)
+    for statement in _OBSERVED_SUMMARY_STATEMENTS:
+        assert statement in core
+    assert "…" not in core
+    assert "*来源：[1][2][3]*" in core
+
+
+def test_render_summary_over_cap_cuts_at_sentence_boundary():
+    statement = "超长首句结论完整。" + ("后续内容同样很长。" * 60)
+    report = _summary_report([statement], ["S1"])
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    core = _core_block(md)
+    para = core.strip().split("\n\n*来源")[0].strip()
+    assert "…" not in core
+    assert para.endswith("。")
+    assert "**" not in core  # 截断路径去强调，无未闭合标记
+
+
+def test_render_summary_within_cap_keeps_bold():
+    statement = "**关键点**：未超限的完整核心结论句子。"
+    report = _summary_report([statement], ["S1"])
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    core = _core_block(md)
+    assert "**关键点**" in core
+
+
+def test_render_summary_named_ellipsis_of_model_is_kept():
+    """模型自带省略号不属渲染瑕疵，渲染层不修改或追加任何内容。"""
+    statement = "结论主体完整，" + "内容" * 30 + "（细节参见正文）……保留模型自带的省略。"
+    report = _summary_report([statement], ["S1"])
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    core = _core_block(md)
+    assert statement in core
+
+
+def test_render_exec_fallback_uses_same_no_ellipsis_semantics():
+    statement = "回退路径首句完整。" + ("回退路径长内容。" * 80)
+    report = ResearchReport(
+        title="t",
+        executive_summary_claim_ids=["LONG"],
+        sections=[
+            ReportSection(
+                heading="H",
+                claims=[
+                    ResearchClaim(
+                        id="LONG", statement=statement, citation_ids=["S1"], confidence="medium"
+                    )
+                ],
+            )
+        ],
+        recommendations=[_claim("CR", ["S1"])],
+    )
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    core = _core_block(md)
+    para = core.strip().split("\n\n*来源")[0].strip()
+    assert "…" not in core
+    assert para.endswith("。")
+    assert "**" not in core
+
+
+def test_render_degraded_report_has_no_ellipsis():
+    report = ResearchReport(
+        title="[DEGRADED] budget_exceeded",
+        executive_summary_claim_ids=["degraded-summary"],
+        sections=[],
+        recommendations=[],
+    )
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+    assert "## 核心结论" in md
+    assert "…" not in md
+    assert "degraded-summary" not in md  # 缺失 claim 被跳过，不渲染半句
