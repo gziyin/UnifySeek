@@ -1,6 +1,6 @@
-# AI Dev Researcher（UnifySeek）
+# UnifySeek
 
-面向 AI / Python / Agent 开发者的**深度调研系统**：输入一个技术调研问题，系统通过
+面向开发者的**深度调研系统**：输入一个技术调研问题，系统通过
 DeepAgents 主从智能体编排自动检索网页、分析上传文档、读取本地知识库源码，把证据
 归档到来源账本，最终产出**带可验证引用、标注冲突与未知项的 Markdown 报告**，并在
 前端实时展示执行过程（单列阶段时间线 + 来源账本 + 交互式报告）。
@@ -54,7 +54,7 @@ EventPublisher: 写库 --> 推 WS --> 前端按 seq 去重/补齐
 | RAG | docling + sentence-transformers + Chroma + torch(cpu) | 纯 Python 无 Docker |
 | 前端 | React 19 + TypeScript + Vite | 单列阶段驱动 UI |
 
-### 设计决策叙事（求职可讲）
+### 设计决策叙事
 
 - **主从编排而非单 Agent 直连**：网页取证、文档/知识库分析拆为专职子智能体，主智能体只做规划与委派，权限用 `FilesystemPermission` 全拒（禁止 ls/read_file/write_file 等）做工具/权限隔离。
 - **事件协议统一 v2**：把 LangGraph `astream_events` 规约为业务事件，`seq` 递增、先落库再推送，断线按 `after_seq` 补齐，前端按 seq 去重。
