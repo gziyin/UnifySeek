@@ -17,6 +17,16 @@ function formatMs(ms: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+/**
+ * #45 显示层构造性修复：总耗时 = 三阶段「已 clamp 的显示值」之和。
+ * 输入各阶段显示 elapsed（ms），直接求和回显，使「总耗时 === Σ(阶段显示值)」
+ * 由构造恒成立，消除各 key 独立棘轮/时钟平移造成的总耗时分叉。
+ * 终态且无棘轮污染时 === reducer 冻结的 totalElapsedMs。
+ */
+export function computeTotalDisplay(phaseElapsedMs: readonly number[]): number {
+  return phaseElapsedMs.reduce((acc, ms) => acc + ms, 0);
+}
+
 function statusFor(state: RunViewState) {
   const text =
     state.connection === "connected"
@@ -277,10 +287,15 @@ export function TimelineCard({ state }: Props) {
   // Date.now() - clockOffsetMs 换算回服务端 wall-clock 再相减，活跃阶段实时刷新与
   // 终态冻结值都在同一时钟上，避免客户端 Date.now() 与服务端事件时间戳直接混算。
   //
-  // 单调钳制（#42）：clampRef 记录每个阶段/总耗时上一次渲染的原始 ms 值，显示取
+  // 单调钳制（#42）：clampRef 记录每个阶段上一次渲染的原始 ms 值，显示取
   // max(prev, computed)，杜绝 offset 突变回跳与 active→done 切换回跳。totalKeyRef
   // 追踪 run 身份（totalStartedAt，reset/新建/恢复时变化），身份变化即重置钳制状态，
   // 避免跨 run 污染。
+  //
+  // 总耗时口径（#45）：总耗时 = 三阶段「已 clamp 的显示值」之和（computeTotalDisplay），
+  // 不再对 total 单独 clamp / 单独按 totalStartedAt 推导——各 key 独立棘轮 + clockOffsetMs
+  // 平移曾使 total 与 Σ(阶段显示值) 脱钩（用户可见「总耗时 > 三阶段之和」）。求和由构造
+  // 恒等，终态无棘轮污染时自然 === reducer 冻结的 totalElapsedMs。
   const totalKeyRef = useRef<number | null>(null);
   const clampRef = useRef<Map<string, number>>(new Map());
   if (totalKeyRef.current !== state.totalStartedAt) {
@@ -302,9 +317,7 @@ export function TimelineCard({ state }: Props) {
       p.status === "active" && p.startedAt ? now - p.startedAt : p.elapsedMs,
     ),
   }));
-  const totalElapsed = state.totalStartedAt
-    ? clamp("total", state.runFinished ? state.totalElapsedMs : now - state.totalStartedAt)
-    : 0;
+  const totalElapsed = computeTotalDisplay(phases.map((p) => p.elapsed));
 
   return (
     <section className="glass-card timeline-card">
