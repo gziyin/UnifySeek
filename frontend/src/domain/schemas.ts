@@ -120,6 +120,7 @@ export const DisagreementSchema = z
 export const ResearchReportSchema = z
   .object({
     title: z.string(),
+    summary_claims: z.array(ResearchClaimSchema).optional().default([]),
     executive_summary_claim_ids: z.array(z.string()),
     sections: z.array(ReportSectionSchema),
     disagreements: z.array(DisagreementSchema).optional().default([]),

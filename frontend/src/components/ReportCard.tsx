@@ -49,9 +49,11 @@ function StructuredReport({ report }: { report: ResearchReport }) {
     claimById.set(claim.id, claim);
   }
 
-  const executive = (report.executive_summary_claim_ids ?? [])
-    .map((id) => claimById.get(id))
-    .filter((c): c is ResearchClaim => Boolean(c));
+  const executive: ResearchClaim[] = (report.summary_claims ?? []).length
+    ? report.summary_claims ?? []
+    : (report.executive_summary_claim_ids ?? [])
+        .map((id) => claimById.get(id))
+        .filter((c): c is ResearchClaim => Boolean(c));
 
   return (
     <div className="report-json">

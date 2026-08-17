@@ -52,6 +52,7 @@ def build_orchestrator_prompt(context: RunContext) -> str:
 - statement 写成完整句子/段落，可用 **粗体** 强调关键结论，可含 markdown 表格。
 - 对比类问题建议用 table 字段呈现维度对比。
 - 引用统一用 citation_ids 表达（渲染层自动转 [n] 编号），不要手写 [n] 编号。
+- 生成顺序：先组织正文 sections → disagreements(冲突) → recommendations(建议)，最后基于全文与证据账本蒸馏 2~4 条全新核心结论（写入 summary_claims，每条 ≤120 字、综合性表述、引用最具支撑力的证据编号、禁止照抄或改写正文句子）。
 """
 
 
