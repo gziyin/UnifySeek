@@ -159,6 +159,7 @@ async def submit_research_report_impl(
     run_id: UUID,
     report_data: dict,
     display_name: str | None = None,
+    system_generated: bool = False,
 ) -> dict:
     records = await store.list_for_run()
     evidence_by_id = {item.id: item for item in records}
@@ -166,35 +167,38 @@ async def submit_research_report_impl(
 
     try:
         report = ResearchReport.model_validate(report_data)
-        claims = collect_claims(report)
+        # \u7cfb\u7edf\u6784\u9020\u7684\u964d\u7ea7\u62a5\u544a\uff08executor \u7b2c\u4e00\u6b21\u964d\u7ea7\u4ea7\u7269\uff09\u662f\u786e\u5b9a\u6027\u6570\u636e\uff0c
+        # \u4e0d\u5c5e\u4e8e\u6a21\u578b\u81ea\u7531\u8f93\u51fa\uff0c\u4e0d\u9002\u7528\u8bc1\u636e\u6821\u9a8c\uff0c\u8df3\u8fc7\u5168\u90e8\u8de8\u6821\u9a8c\uff08summary \u6ce8\u518c\u8868 + claim/disagreement \u5f15\u7528 + high-confidence \u4fee\u590d\uff09\u3002
+        if not system_generated:
+            claims = collect_claims(report)
 
-        for claim_id in report.executive_summary_claim_ids:
-            if claim_id not in claims:
-                raise ReportValidationError(f"unknown summary claim: {claim_id}")
+            for claim_id in report.executive_summary_claim_ids:
+                if claim_id not in claims:
+                    raise ReportValidationError(f"unknown summary claim: {claim_id}")
 
-        for claim in claims.values():
-            if not claim.citation_ids:
-                raise ReportValidationError(f"claim {claim.id} missing citations")
-            unknown = [cid for cid in claim.citation_ids if cid not in evidence_by_id]
-            if unknown:
-                raise ReportValidationError(
-                    f"claim {claim.id} references unknown evidence: {unknown}"
-                )
-            if len(set(claim.citation_ids)) != len(claim.citation_ids):
-                raise ReportValidationError(
-                    f"claim {claim.id} references the same evidence more than once"
-                )
+            for claim in claims.values():
+                if not claim.citation_ids:
+                    raise ReportValidationError(f"claim {claim.id} missing citations")
+                unknown = [cid for cid in claim.citation_ids if cid not in evidence_by_id]
+                if unknown:
+                    raise ReportValidationError(
+                        f"claim {claim.id} references unknown evidence: {unknown}"
+                    )
+                if len(set(claim.citation_ids)) != len(claim.citation_ids):
+                    raise ReportValidationError(
+                        f"claim {claim.id} references the same evidence more than once"
+                    )
 
-        for disagreement in report.disagreements:
-            side_ids = [cid for side in disagreement.sides for cid in side.citation_ids]
-            unknown = [cid for cid in side_ids if cid not in evidence_by_id]
-            if unknown:
-                raise ReportValidationError(
-                    f"disagreement '{disagreement.topic}' references unknown evidence: {unknown}"
-                )
+            for disagreement in report.disagreements:
+                side_ids = [cid for side in disagreement.sides for cid in side.citation_ids]
+                unknown = [cid for cid in side_ids if cid not in evidence_by_id]
+                if unknown:
+                    raise ReportValidationError(
+                        f"disagreement '{disagreement.topic}' references unknown evidence: {unknown}"
+                    )
 
-        # Issue 6a: \u5f31\u8bc1\u636e\u4e0b\u7684 high confidence \u81ea\u52a8\u964d\u7ea7\uff08\u53ef\u964d\u7ea7\uff09\uff0c\u4e0d\u518d\u6574\u4efd\u5931\u8d25\u3002
-        report, _healed_ids = _heal_high_confidence(report, evidence_by_id)
+            # Issue 6a: \u5f31\u8bc1\u636e\u4e0b\u7684 high confidence \u81ea\u52a8\u964d\u7ea7\uff08\u53ef\u964d\u7ea7\uff09\uff0c\u4e0d\u518d\u6574\u4efd\u5931\u8d25\u3002
+            report, _healed_ids = _heal_high_confidence(report, evidence_by_id)
     except (ValidationError, ReportValidationError) as exc:
         degrade_reason = f"{type(exc).__name__}: {exc}"
         report = None
@@ -218,7 +222,11 @@ async def submit_research_report_impl(
         markdown=markdown,
         title=title,
         display_name=display_name,
-        report_json=report.model_dump(mode="json") if report is not None else None,
+        report_json=(
+            report.model_dump(mode="json")
+            if report is not None and not system_generated
+            else None
+        ),
     )
     return {
         "artifact_id": str(artifact_id),
