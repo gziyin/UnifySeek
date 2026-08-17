@@ -265,15 +265,17 @@ def create_orchestrator_tools(
 
     async def submit_research_report(
         title: str,
-        executive_summary_claim_ids: list[str],
         sections: list[ReportSection],
         recommendations: list[ResearchClaim],
         disagreements: list[Disagreement] | None = None,
         unknowns: list[str] | None = None,
+        executive_summary_claim_ids: list[str] | None = None,
+        summary_claims: list[ResearchClaim] | None = None,
     ) -> dict:
         report_data = {
             "title": title,
-            "executive_summary_claim_ids": executive_summary_claim_ids,
+            "executive_summary_claim_ids": executive_summary_claim_ids or [],
+            "summary_claims": [c.model_dump(mode="json") for c in (summary_claims or [])],
             "sections": [s.model_dump(mode="json") for s in sections],
             "recommendations": [c.model_dump(mode="json") for c in recommendations],
             "disagreements": [d.model_dump(mode="json") for d in (disagreements or [])],
@@ -311,7 +313,10 @@ def create_orchestrator_tools(
                 "提交最终结构化研究报告。硬性前置条件：1) 必须先调用 search_web（必要时 "
                 "extract_web_sources）收集网页证据；2) 先调用 get_evidence_ledger 核对证据 ID；"
                 "3) 报告内每个 claim 的 citation_ids 必须引用 ledger 中真实存在的证据 ID"
-                "（形如 S1/S2/D1）。返回 artifact_id。"
+                "（形如 S1/S2/D1）。生成顺序：先组织正文 sections → disagreements → "
+                "recommendations，最后基于全文与证据账本蒸馏 2~4 条全新核心结论（summary_claims，"
+                "每条 ≤120 字、综合性表述、引用最具支撑力的证据编号，禁止照抄或改写正文句子）。"
+                "返回 artifact_id。"
             ),
             args_schema=SubmitResearchReportArgs,
         ),

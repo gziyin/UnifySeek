@@ -50,7 +50,8 @@ class Disagreement(BaseModel):
 
 class ResearchReport(BaseModel):
     title: str
-    executive_summary_claim_ids: list[str] = Field(min_length=1)
+    summary_claims: list[ResearchClaim] = Field(default_factory=list)
+    executive_summary_claim_ids: list[str] = Field(default_factory=list)
     sections: list[ReportSection]
     disagreements: list[Disagreement] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)

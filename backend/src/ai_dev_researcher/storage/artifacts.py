@@ -26,10 +26,14 @@ def _build_numbering(
                 seen.add(cid)
                 order.append(cid)
 
-    for claim_id in report.executive_summary_claim_ids:
-        claim = claims_by_id.get(claim_id)
-        if claim is not None:
+    if report.summary_claims:
+        for claim in report.summary_claims:
             add(claim.citation_ids)
+    else:
+        for claim_id in report.executive_summary_claim_ids:
+            claim = claims_by_id.get(claim_id)
+            if claim is not None:
+                add(claim.citation_ids)
 
     def walk_section(sec: ReportSection) -> None:
         for claim in sec.claims:
@@ -145,12 +149,18 @@ def render_report_markdown(
 
     lines.append("## 核心结论")
     lines.append("")
-    for claim_id in report.executive_summary_claim_ids:
-        claim = claims_by_id.get(claim_id)
-        if claim is not None:
+    if report.summary_claims:
+        for claim in report.summary_claims:
             lines.append(_truncate_summary(claim.statement))
-    source_line = _render_sources_line(
-        [
+        summary_citation_ids = [
+            cid for claim in report.summary_claims for cid in claim.citation_ids
+        ]
+    else:
+        for claim_id in report.executive_summary_claim_ids:
+            claim = claims_by_id.get(claim_id)
+            if claim is not None:
+                lines.append(_truncate_summary(claim.statement))
+        summary_citation_ids = [
             cid
             for claim_id in report.executive_summary_claim_ids
             for cid in (
@@ -158,9 +168,8 @@ def render_report_markdown(
                 if claims_by_id.get(claim_id) is not None
                 else []
             )
-        ],
-        numbering,
-    )
+        ]
+    source_line = _render_sources_line(summary_citation_ids, numbering)
     if source_line:
         lines.append("")
         lines.append(source_line)
@@ -252,6 +261,8 @@ def collect_claims(report: ResearchReport) -> dict[str, ResearchClaim]:
 
     for section in report.sections:
         walk_section(section)
+    for claim in report.summary_claims:
+        add_claim(claim)
     for claim in report.recommendations:
         add_claim(claim)
     return claims

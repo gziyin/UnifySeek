@@ -83,10 +83,13 @@ async def test_submit_tool_args_schema_exposes_structured_fields(env):
     tool = await _submit_tool(env)
     # StructuredTool 将 args_schema 扁平化为顶层字段（无 "properties" 包装）
     props = tool.args
-    for field in ["title", "executive_summary_claim_ids", "sections", "recommendations", "disagreements", "unknowns"]:
+    for field in ["title", "executive_summary_claim_ids", "summary_claims", "sections", "recommendations", "disagreements", "unknowns"]:
         assert field in props, f"missing schema field: {field}"
     assert props["sections"].get("description")
     assert props["recommendations"].get("minItems") == 1
+    assert props["summary_claims"].get("description")
+    # #43：executive_summary_claim_ids 放宽为可选（无 minItems=1 强制）
+    assert props["executive_summary_claim_ids"].get("minItems") is None
 
 
 @pytest.mark.asyncio
@@ -110,6 +113,52 @@ async def test_submit_tool_forwards_structured_report_data(env):
     assert section["claims"][0]["citation_ids"] == ["S1"]
     assert captured["report_data"]["unknowns"] == ["两者性能基准数据暂缺"]
     # 嵌套模型已转纯 JSON dict，可被 ResearchReport.model_validate 直接消费
+    from ai_dev_researcher.domain.reports import ResearchReport
+
+    ResearchReport.model_validate(captured["report_data"])
+
+
+@pytest.mark.asyncio
+async def test_submit_tool_forwards_summary_claims(env):
+    """#43：factory 转发 summary_claims 与可选 exec ids，report_data 可被 ResearchReport.model_validate 消费。"""
+    context, store, artifacts = env
+    tool = await _submit_tool(env)
+
+    captured: dict = {}
+
+    async def _fake_impl(**kwargs) -> dict:
+        captured.update(kwargs)
+        return {"artifact_id": "851a4589-edee-470e-9732-0ee5548fa5b7", "title": "t"}
+
+    payload = {
+        "title": "DeepAgents 与 LangGraph 编排对比",
+        "sections": [
+            {
+                "heading": "子智能体委派",
+                "claims": [
+                    {
+                        "id": "C1",
+                        "statement": "DeepAgents 通过 task 工具委派",
+                        "citation_ids": ["S1"],
+                        "confidence": "medium",
+                    }
+                ],
+            }
+        ],
+        "recommendations": [
+            {"id": "R1", "statement": "个人项目建议使用 DeepAgents", "citation_ids": ["S1"], "confidence": "low"}
+        ],
+        "summary_claims": [
+            {"id": "SUM1", "statement": "蒸馏结论：两框架编排哲学不同", "citation_ids": ["S1"], "confidence": "medium"}
+        ],
+    }
+    with patch("ai_dev_researcher.tools.factory.submit_research_report_impl", new=_fake_impl):
+        result = await tool.ainvoke(payload)
+
+    assert result["artifact_id"]
+    assert captured["report_data"]["title"] == "DeepAgents 与 LangGraph 编排对比"
+    assert captured["report_data"]["executive_summary_claim_ids"] == []
+    assert captured["report_data"]["summary_claims"][0]["id"] == "SUM1"
     from ai_dev_researcher.domain.reports import ResearchReport
 
     ResearchReport.model_validate(captured["report_data"])
