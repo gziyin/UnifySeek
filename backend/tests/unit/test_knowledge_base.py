@@ -13,10 +13,22 @@ from ai_dev_researcher.repositories.sqlite import connect, init_db
 from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.storage.paths import WorkspacePaths
 from ai_dev_researcher.tools.knowledge_base import (
+    KB_BUDGET_EXHAUSTED_GUIDANCE,
     list_knowledge_base_entries_impl,
     read_knowledge_base_file_impl,
     record_knowledge_base_evidence_impl,
 )
+
+
+def test_budget_exhausted_guidance_is_not_misleading():
+    """#44 D2：预算耗尽引导语不得误导模型「知识库无关/已充分检索」，
+    应如实说明是配额用尽并引导记录 unknowns。"""
+    assert "KB 软预算已用尽" in KB_BUDGET_EXHAUSTED_GUIDANCE
+    assert "无法继续检索/读取知识库" in KB_BUDGET_EXHAUSTED_GUIDANCE
+    assert "unknowns" in KB_BUDGET_EXHAUSTED_GUIDANCE
+    # 旧误导措辞必须移除（曾诱导模型放弃高度相关的知识库）。
+    assert "已充分检索" not in KB_BUDGET_EXHAUSTED_GUIDANCE
+    assert "或不相关" not in KB_BUDGET_EXHAUSTED_GUIDANCE
 
 
 @pytest.fixture
