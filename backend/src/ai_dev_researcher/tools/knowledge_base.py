@@ -20,16 +20,21 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_KB_EXTENSIONS = {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".toml"}
 
-KB_BUDGET_EXHAUSTED_GUIDANCE = "知识库已充分检索或不相关，请转向网页/上传文档证据。"
+KB_BUDGET_EXHAUSTED_GUIDANCE = (
+    "KB 软预算已用尽，无法继续检索/读取知识库；请以已记录的证据作答，"
+    "未记录的知识库结论请记入 unknowns。"
+)
 
 
 @dataclass
 class KbToolBudget:
     """Run-scoped soft budget for KB tools (#13).
 
-    Counts model-invoked KB tool calls (search/read/list/record_knowledge_base_*).
-    ``limit == 0`` means unlimited. Prefetch does not go through the tool wrappers,
-    so it is never counted here.
+    Counts model-invoked KB search/read/list calls. ``record_knowledge_base_evidence``
+    is exempt from the budget (#44): it is the only path that writes K evidence into
+    the ledger, so it must not be starved by read/list consumption. ``limit == 0``
+    means unlimited. Prefetch does not go through the tool wrappers, so it is never
+    counted here.
     """
 
     limit: int

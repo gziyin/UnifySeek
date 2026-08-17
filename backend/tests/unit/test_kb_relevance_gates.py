@@ -22,7 +22,7 @@ from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.storage.knowledge_index import KbChunk
 from ai_dev_researcher.storage.paths import WorkspacePaths
 from ai_dev_researcher.tools.factory import create_document_tools
-from ai_dev_researcher.tools.knowledge_base import KbToolBudget
+from ai_dev_researcher.tools.knowledge_base import KB_BUDGET_EXHAUSTED_GUIDANCE, KbToolBudget
 
 ARTIFACT_ID = "851a4589-edee-470e-9732-0ee5548fa5b7"
 
@@ -216,7 +216,7 @@ async def test_kb_tool_budget_short_circuits_search(tmp_path: Path):
     blocked = await tools["search_knowledge_base"].ainvoke({"query": "q"})
     assert len(index.calls) == 2
     assert blocked["note"] == "budget_exceeded"
-    assert "知识库已充分检索" in blocked["guidance"]
+    assert "KB 软预算已用尽" in blocked["guidance"]
 
 
 async def test_kb_tool_budget_covers_all_kb_tools(tmp_path: Path):
@@ -269,6 +269,7 @@ async def test_kb_tool_budget_covers_all_kb_tools(tmp_path: Path):
     assert read["note"] == "budget_exceeded"
     assert read["text"] == ""
 
+    # #44：record 豁免 KB 软预算 —— 即使 search/read/list 已耗尽预算仍成功落账本。
     record = await tools["record_knowledge_base_evidence"].ainvoke(
         {
             "path": "notes.md",
@@ -278,9 +279,10 @@ async def test_kb_tool_budget_covers_all_kb_tools(tmp_path: Path):
             "line_end": 2,
         }
     )
-    assert record["note"] == "budget_exceeded"
+    assert "budget_exceeded" not in (record.get("note") or "")
+    assert record["evidence_id"].startswith("K")
     ledger = await store.list_for_run()
-    assert not any(item.source_type == "knowledge_base" for item in ledger)
+    assert any(item.source_type == "knowledge_base" for item in ledger)
 
     listing = await tools["list_knowledge_base_entries"].ainvoke({"path": "."})
     assert listing["note"] == "budget_exceeded"
@@ -352,7 +354,7 @@ async def test_executor_kb_budget_blocked_run_succeeds_with_guidance(env):
                 "results": [],
                 "count": 0,
                 "note": "budget_exceeded",
-                "guidance": "知识库已充分检索或不相关，请转向网页/上传文档证据。",
+                "guidance": KB_BUDGET_EXHAUSTED_GUIDANCE,
             },
         ),
         _tool_start("submit_research_report", "r3", {"title": "t"}),
@@ -377,25 +379,45 @@ async def test_executor_kb_budget_blocked_run_succeeds_with_guidance(env):
     assert any("budget_exceeded" in (e.payload.get("output_summary") or "") for e in completed)
 
 
-async def test_executor_blocked_record_does_not_publish_ledger_events(env):
-    """KB 软预算拦下的 record 不发布脏账本事件（source.discovered / evidence.recorded）。"""
+async def test_executor_record_still_writes_k_after_budget_exhausted(env):
+    """#44：record 豁免 KB 软预算 —— 即使 search 已因预算耗尽被短路，
+    record_knowledge_base_evidence 仍成功落账本并发布 K 账本事件。"""
     settings, conn, session, run, publisher, executor = env
     events = [
-        _tool_start("record_knowledge_base_evidence", "r1", {"path": "x.py"}),
+        _tool_start("search_knowledge_base", "r1", {"query": "q"}),
         _tool_end(
-            "record_knowledge_base_evidence",
+            "search_knowledge_base",
             "r1",
             {
+                "results": [],
+                "count": 0,
                 "note": "budget_exceeded",
-                "guidance": "知识库已充分检索或不相关，请转向网页/上传文档证据。",
+                "guidance": KB_BUDGET_EXHAUSTED_GUIDANCE,
             },
         ),
-        _tool_start("submit_research_report", "r2", {"title": "t"}),
-        _tool_end("submit_research_report", "r2", {"artifact_id": ARTIFACT_ID, "title": "t"}),
+        _tool_start("record_knowledge_base_evidence", "r2", {"path": "notes.md"}),
+        _tool_end(
+            "record_knowledge_base_evidence",
+            "r2",
+            {
+                "evidence_id": "K1",
+                "locator": "kb:notes.md lines 1-2",
+                "path": "notes.md",
+                "line_start": 1,
+                "line_end": 2,
+                "excerpt": "e",
+                "title": "t",
+            },
+        ),
+        _tool_start("submit_research_report", "r3", {"title": "t"}),
+        _tool_end("submit_research_report", "r3", {"artifact_id": ARTIFACT_ID, "title": "t"}),
     ]
     stub = _StubAgent(events)
 
-    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+    with patch(
+        "ai_dev_researcher.services.agent_executor.create_research_agent",
+        return_value=stub,
+    ):
         await executor(run.run_id)
 
     updated = await RunRepository(conn).get(run.run_id)
@@ -403,22 +425,18 @@ async def test_executor_blocked_record_does_not_publish_ledger_events(env):
     assert updated.status == RunStatus.SUCCEEDED
 
     db_events = await EventRepository(conn).list_after(run.run_id, 0)
-    blocked_discovered = [
+    discovered = [
         e
         for e in db_events
         if e.type == "source.discovered" and e.payload.get("source_type") == "knowledge_base"
     ]
-    assert blocked_discovered == []
-    blocked_recorded = [
+    assert [e.payload.get("evidence_id") for e in discovered] == ["K1"]
+    recorded = [
         e
         for e in db_events
         if e.type == "evidence.recorded" and e.payload.get("source_type") == "knowledge_base"
     ]
-    assert blocked_recorded == []
-
-    # 短路说明随 tool.completed 发布（output_summary 含引导）。
-    completed = [e for e in db_events if e.type == "tool.completed"]
-    assert any("budget_exceeded" in (e.payload.get("output_summary") or "") for e in completed)
+    assert [e.payload.get("evidence_id") for e in recorded] == ["K1"]
 
 
 async def test_executor_kb_budget_wired_via_di(env):

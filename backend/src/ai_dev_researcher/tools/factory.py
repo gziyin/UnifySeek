@@ -67,7 +67,12 @@ def create_document_tools(
     kb_budget: KbToolBudget | None = None,
 ) -> list[StructuredTool]:
     def _kb_blocked() -> dict | None:
-        """Return a short-circuit payload when the KB soft budget is exhausted."""
+        """Return a short-circuit payload when the KB soft budget is exhausted.
+
+        Applies to search/read/list only. ``record_knowledge_base_evidence`` is
+        exempt (#44): K 证据只能经模型显式 record 进入账本，若与 search/read/list
+        共享配额，定位与精读可能提前耗尽预算而饿死 record，导致账本漏记 K 证据。
+        """
         if kb_budget is None or kb_budget.acquire():
             return None
         return {
@@ -131,9 +136,8 @@ def create_document_tools(
         line_start: int,
         line_end: int,
     ) -> dict:
-        blocked = _kb_blocked()
-        if blocked is not None:
-            return blocked
+        # #44：record 不消耗 KB 软预算（search/read/list 仍计）；K 证据是模型将
+        # 预检/检索结果落账本的唯一途径，必须保证预算耗尽时仍能记录。
         return await record_knowledge_base_evidence_impl(
             context=context,
             store=store,
@@ -315,7 +319,8 @@ def create_orchestrator_tools(
                 "3) 报告内每个 claim 的 citation_ids 必须引用 ledger 中真实存在的证据 ID"
                 "（形如 S1/S2/D1）。生成顺序：先组织正文 sections → disagreements → "
                 "recommendations，最后基于全文与证据账本蒸馏 2~4 条全新核心结论（summary_claims，"
-                "每条 ≤120 字、综合性表述、引用最具支撑力的证据编号，禁止照抄或改写正文句子）。"
+                "每条必须是完整自洽的句子、≤120 字、综合性表述、引用最具支撑力的证据编号、"
+                "禁止照抄或改写正文句子、禁止使用省略号『…』、禁止输出不完整或被截断的半句）。"
                 "返回 artifact_id。"
             ),
             args_schema=SubmitResearchReportArgs,
