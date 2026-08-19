@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     tavily_api_key: str = ""
 
-    # Agent D budget 护栏：0 表示不限制；可由 .env / 环境变量覆盖，也可在 run constraints 中传。
+    # Agent budget 收紧护栏：正数可由 .env / 环境变量覆盖并收紧 output_mode profile；
+    # 0/负数不放开 profile。run constraints 可继续传入更严格的覆盖值。
     agent_max_tool_calls: int = 60
     agent_max_elapsed_seconds: float = 600.0
     # 阶段级看门狗（0 表示禁用该阶段预算）：单次 attempt 内 plan/research/report
@@ -68,7 +69,8 @@ class Settings(BaseSettings):
     kb_prefetch_score_threshold: float = 0.3
     # KB 软预算：单次 run 内 KB 类工具（search/read/list/record_knowledge_base_*）
     # 调用上限。超过后后续 KB 工具短路返回空结果 + 引导提示（不触发全局
-    # BUDGET_EXCEEDED）。0 表示不限制。可由 .env（KB_MAX_TOOL_CALLS）覆盖。
+    # BUDGET_EXCEEDED）。正数可收紧 output_mode profile；0/负数不放开 profile。
+    # 可由 .env（KB_MAX_TOOL_CALLS）覆盖。
     kb_max_tool_calls: int = 12
 
     # Phase-1 vertical slice uses a fake executor until DeepAgents is wired.

@@ -12,6 +12,11 @@ from ai_dev_researcher.agents.model import create_model_binding
 from ai_dev_researcher.agents.orchestrator import create_research_agent
 from ai_dev_researcher.agents.stream_adapter import map_framework_event
 from ai_dev_researcher.core.config import Settings
+from ai_dev_researcher.core.output_profiles import (
+    RunBudget,
+    get_output_profile,
+    resolve_run_budget,
+)
 from ai_dev_researcher.domain.runs import ALLOWED_TRANSITIONS, Run, RunStatus
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.repositories.evidence import EvidenceRepository
@@ -62,6 +67,27 @@ class _StreamAttemptResult:
 
 # 空闲超时哨兵：事件流内连续 idle_timeout 秒无事件时由 _iter_with_idle_timeout 产出。
 _IDLE_TIMEOUT_SENTINEL: dict = {"event": "__agent_idle_timeout__"}
+
+# record 类工具返回的短路 note：这些响应不产生真实证据，executor 不得发布
+# source.discovered / evidence.recorded 账本事件（引导文案随 tool.completed 输出）。
+_RECORD_BLOCKED_NOTES = {"budget_exceeded", "duplicate", "candidate_rejected"}
+
+# 探索性工具（batch C）：受「max_tool_calls - reserve」探索预算约束。
+# get_evidence_ledger / submit_research_report 为收尾工具，不占探索预算、不受其拦截。
+_EXPLORATORY_TOOLS = frozenset(
+    {
+        "search_web",
+        "extract_web_sources",
+        "search_run_documents",
+        "read_run_document",
+        "list_run_documents",
+        "record_document_evidence",
+        "search_knowledge_base",
+        "read_knowledge_base_file",
+        "list_knowledge_base_entries",
+        "record_knowledge_base_evidence",
+    }
+)
 
 
 def _iter_with_idle_timeout(stream, timeout: float | None):
@@ -126,7 +152,7 @@ class AgentResearchExecutor:
         if run is None:
             return
 
-        max_tool_calls, max_elapsed_seconds = self._resolve_budget(run)
+        budget = self._resolve_budget(run)
         context = RunContext(
             run_id=run.run_id,
             session_id=run.session_id,
@@ -135,10 +161,11 @@ class AgentResearchExecutor:
             max_web_sources=run.request.max_web_sources,
             constraints=run.request.constraints,
             focus_areas=run.request.focus_areas,
+            output_mode=run.request.output_mode,
             paths=self._paths,
             settings=self._settings,
-            max_tool_calls=max_tool_calls,
-            max_elapsed_seconds=max_elapsed_seconds,
+            max_tool_calls=budget.max_tool_calls,
+            max_elapsed_seconds=budget.max_elapsed_seconds,
         )
         store = EvidenceStore(
             run_id=run.run_id,
@@ -160,7 +187,11 @@ class AgentResearchExecutor:
             await self._prefetch_knowledge(context, store)
 
             model_binding = create_model_binding(self._settings)
-            kb_budget = KbToolBudget(self._settings.kb_max_tool_calls)
+            profile = get_output_profile(run.request.output_mode)
+            kb_budget = KbToolBudget(
+                budget.kb_max_tool_calls,
+                k_evidence_limit=profile.max_k_evidence,
+            )
             agent = create_research_agent(
                 context,
                 model_binding,
@@ -237,6 +268,7 @@ class AgentResearchExecutor:
                     input_payload=attempt["input"],
                     config=attempt["config"],
                     attempt_index=attempt_index,
+                    exploration_budget=self._exploration_budget(budget),
                 )
                 if attempt_result.last_message:
                     last_message = attempt_result.last_message
@@ -402,6 +434,7 @@ class AgentResearchExecutor:
         input_payload: dict,
         config: dict,
         attempt_index: int = 1,
+        exploration_budget: int | None = None,
     ) -> _StreamAttemptResult:
         report_artifact_id: str | None = None
         last_message = ""
@@ -411,6 +444,9 @@ class AgentResearchExecutor:
         stage_started = started
         stage = "plan"
         tool_call_count = 0
+        # batch C：探索性工具调用计数，受 max_tool_calls - reserve 上限约束；
+        # get_evidence_ledger / submit_research_report 不计入。
+        exploration_count = 0
         # 使用 v2 经典事件协议（on_tool_start/on_tool_end，{event,name,data,run_id}）。
         # langgraph 1.2.10 的 v3 是实验性 run-stream 协议（{type,method,params}），
         # 与 stream_adapter.map_framework_event 的解析格式不兼容（M1 实测发现）。
@@ -481,6 +517,27 @@ class AgentResearchExecutor:
                 tool_inputs[payload.get("tool_call_id", "")] = payload.get(
                     "input_summary", ""
                 )
+                # batch C：探索达上限（max_tool_calls - reserve）后，新的探索类工具
+                # 直接拦截返回预算原因（不执行、不 retry）；收尾工具不拦截。
+                if payload.get("tool_name") in _EXPLORATORY_TOOLS:
+                    if (
+                        exploration_budget is not None
+                        and exploration_count >= exploration_budget
+                    ):
+                        logger.warning(
+                            "attempt %s exploration budget reached (count=%s>=%s); "
+                            "blocking exploratory tool %s",
+                            attempt_index,
+                            exploration_count,
+                            exploration_budget,
+                            payload.get("tool_name"),
+                        )
+                        return _StreamAttemptResult(
+                            report_artifact_id=report_artifact_id,
+                            budget_reason="budget_exceeded: exploration_budget",
+                            last_message=last_message or None,
+                        )
+                    exploration_count += 1
             if event_type == "tool.completed":
                 payload["tool_input"] = tool_inputs.get(
                     payload.get("tool_call_id", ""), ""
@@ -521,10 +578,11 @@ class AgentResearchExecutor:
 
             if event_type == "tool.completed" and payload.get("recorded"):
                 recorded = payload["recorded"]
-                # KB 软预算短路（#13）：record 被预算拦下时不产生真实证据，
+                # KB 软预算短路（#13）/ 重复候选（#A2 duplicate）/ 候选被拒（#A2）/
+                # K 上限（#A2 budget_exceeded）：这些记录不产生真实新证据，
                 # 不发布 source.discovered / evidence.recorded 脏账本事件；
                 # 引导提示已随 tool.completed 的 output_summary 转发给前端。
-                if recorded.get("note") != "budget_exceeded":
+                if recorded.get("note") not in _RECORD_BLOCKED_NOTES:
                     tool_name = payload.get("tool_name", "")
                     if tool_name == "record_knowledge_base_evidence":
                         actor = "document-analyst"
@@ -766,26 +824,27 @@ class AgentResearchExecutor:
         )
         return str(result["artifact_id"])
 
-    def _resolve_budget(self, run: Run) -> tuple[int, float]:
-        max_tool_calls = self._settings.agent_max_tool_calls
-        max_elapsed_seconds = self._settings.agent_max_elapsed_seconds
-        for constraint in run.request.constraints:
-            stripped = constraint.strip()
-            for sep in ("=", ":"):
-                if sep not in stripped:
-                    continue
-                key, value = (part.strip() for part in stripped.split(sep, 1))
-                if key == "max_tool_calls":
-                    try:
-                        max_tool_calls = max(0, int(value))
-                    except ValueError:
-                        pass
-                elif key == "max_elapsed_seconds":
-                    try:
-                        max_elapsed_seconds = max(0.0, float(value))
-                    except ValueError:
-                        pass
-        return max(0, int(max_tool_calls)), max(0.0, float(max_elapsed_seconds))
+    def _resolve_budget(self, run: Run) -> RunBudget:
+        """Output-mode profile 初始值 + Settings 正数全局收紧 + constraints 更严格覆盖。
+
+        Settings 正数作为收紧上限（min(profile, settings)）；0 不放开预算（不绕过
+        profile，防成本失控）。KB 计数随 profile + settings 收紧（KB 软预算，record
+        仍豁免）。预算超限后直接走 BUDGET_EXCEEDED 降级链，不继续搜索、不发起 retry。
+        """
+        return resolve_run_budget(
+            run.request.output_mode, run.request.constraints, self._settings
+        )
+
+    @staticmethod
+    def _exploration_budget(budget: RunBudget) -> int | None:
+        """探索类工具预算 = max_tool_calls - reserve（为 ledger + submit 预留 2 次）。
+
+        max_tool_calls <= 0 表示不限制（探索同样不限制，返回 None）；否则取
+        max(0, ...)：当总预算不足以容纳 reserve 时，完全禁止探索，仅允许收尾工具。
+        """
+        if budget.max_tool_calls <= 0:
+            return None
+        return max(0, budget.max_tool_calls - budget.reserve)
 
     def _budget_reason(
         self,
@@ -793,8 +852,8 @@ class AgentResearchExecutor:
         elapsed_seconds: float,
         context: RunContext,
     ) -> str | None:
-        if context.max_tool_calls and tool_calls >= context.max_tool_calls:
-            return "budget_exceeded: max_tool_calls"
+        # 工具调用预算已由「探索预算」承担（batch C：在探索工具 tool.started 时拦截），
+        # 此处只保留耗时看门狗；收尾工具（get_evidence_ledger / submit）不受其拦截。
         if context.max_elapsed_seconds and elapsed_seconds >= context.max_elapsed_seconds:
             return "budget_exceeded: max_elapsed_seconds"
         return None

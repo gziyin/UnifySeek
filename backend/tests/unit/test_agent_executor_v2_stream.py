@@ -42,6 +42,16 @@ def _model_end(content: str) -> dict:
     }
 
 
+def _explore_events(count: int, prefix: str = "s") -> list[dict]:
+    """Batch C：生成 count 次 search_web 的 start/end 事件（探索性工具）。"""
+    events: list[dict] = []
+    for i in range(count):
+        rid = f"{prefix}{i}"
+        events.append(_tool_start("search_web", rid, {"query": "q"}))
+        events.append(_tool_end("search_web", rid, {"items": []}))
+    return events
+
+
 ARTIFACT_ID = "851a4589-edee-470e-9732-0ee5548fa5b7"
 
 
@@ -321,10 +331,11 @@ class _FakeKnowledgeIndex:
 
 @pytest.mark.asyncio
 async def test_executor_budget_max_tool_calls_writes_degraded_report(env, tmp_path):
-    """工具调用数超限：停止漫游、写 DEGRADED 报告、run FAILED with BUDGET_EXCEEDED。"""
+    """Settings 正数作为全局收紧上限时，探索达上限（max_tool_calls-2）：停止漫游、
+    写 DEGRADED 报告、run FAILED with BUDGET_EXCEEDED。"""
     settings, conn, session, run, publisher, executor = env
-    executor._settings.agent_max_tool_calls = 2
-    executor._settings.agent_max_elapsed_seconds = 0
+    # medium profile 40 被 settings 4 收紧（min(40, 4)=4）→ 探索预算 = 4-2 = 2。
+    executor._settings.agent_max_tool_calls = 4
     events = [
         _tool_start("search_web", "r1", {"query": "DeepAgents"}),
         _tool_end("search_web", "r1", {"items": []}),
@@ -341,7 +352,7 @@ async def test_executor_budget_max_tool_calls_writes_degraded_report(env, tmp_pa
     assert updated is not None
     assert updated.status == RunStatus.FAILED
     assert updated.error_code == "BUDGET_EXCEEDED"
-    assert "max_tool_calls" in updated.error_message
+    assert "exploration_budget" in updated.error_message
     assert updated.report_artifact_id is not None
 
     types = await _event_types(conn, run.run_id)
@@ -351,13 +362,13 @@ async def test_executor_budget_max_tool_calls_writes_degraded_report(env, tmp_pa
 
 @pytest.mark.asyncio
 async def test_executor_budget_constraints_override_settings(env, tmp_path):
-    """run constraints 可传 max_tool_calls，护栏在请求级生效。"""
+    """run constraints 可传 max_tool_calls，护栏在请求级生效（探索预算 = max-2）。"""
     settings, conn, session, run, publisher, executor = env
     run2 = Run(
         session_id=session.session_id,
         request=ResearchRequest(
             question="测试问题：通过约束传递预算上限",
-            constraints=["max_tool_calls=1"],
+            constraints=["max_tool_calls=3"],
         ),
     )
     await RunRepository(conn).create(run2)
@@ -375,7 +386,76 @@ async def test_executor_budget_constraints_override_settings(env, tmp_path):
     assert updated is not None
     assert updated.status == RunStatus.FAILED
     assert updated.error_code == "BUDGET_EXCEEDED"
-    assert "max_tool_calls" in updated.error_message
+    assert "exploration_budget" in updated.error_message
+
+
+@pytest.mark.asyncio
+async def test_executor_output_mode_wires_profile_budget_into_context(env):
+    """output_mode 注入 RunContext：max_tool_calls/max_elapsed 取 profile 初始值（short=24/120s）。"""
+    settings, conn, session, run, publisher, executor = env
+    run2 = Run(
+        session_id=session.session_id,
+        request=ResearchRequest(question="短调研", output_mode="short"),
+    )
+    await RunRepository(conn).create(run2)
+    captured = {}
+    events = [
+        _tool_start("search_web", "r1", {"query": "DeepAgents"}),
+        _tool_end("search_web", "r1", {"items": [{"evidence_id": "S1", "url": "https://x"}]}),
+        _tool_start("submit_research_report", "r2", {"title": "t"}),
+        _tool_end("submit_research_report", "r2", {"artifact_id": ARTIFACT_ID, "title": "t"}),
+    ]
+    stub = _StubAgent(events)
+
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None, kb_budget=None):
+        captured["context"] = context
+        captured["kb_budget"] = kb_budget
+        return stub
+
+    with patch(
+        "ai_dev_researcher.services.agent_executor.create_research_agent",
+        side_effect=_fake_create,
+    ):
+        await executor(run2.run_id)
+
+    updated = await RunRepository(conn).get(run2.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    context = captured["context"]
+    assert context.output_mode.value == "short"
+    # short profile：24 工具 / 120s / KB 6。
+    assert context.max_tool_calls == 24
+    assert context.max_elapsed_seconds == 120.0
+    assert captured["kb_budget"].limit == 6
+
+
+@pytest.mark.asyncio
+async def test_executor_default_output_mode_medium_profile(env):
+    """默认 output_mode=medium：profile 预算 40 工具 / 300s / KB 12 经 DI 注入。"""
+    settings, conn, session, run, publisher, executor = env
+    captured = {}
+    events = [
+        _tool_start("submit_research_report", "r2", {"title": "t"}),
+        _tool_end("submit_research_report", "r2", {"artifact_id": ARTIFACT_ID, "title": "t"}),
+    ]
+    stub = _StubAgent(events)
+
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None, kb_budget=None):
+        captured["context"] = context
+        captured["kb_budget"] = kb_budget
+        return stub
+
+    with patch(
+        "ai_dev_researcher.services.agent_executor.create_research_agent",
+        side_effect=_fake_create,
+    ):
+        await executor(run.run_id)
+
+    context = captured["context"]
+    assert context.output_mode.value == "medium"
+    assert context.max_tool_calls == 40
+    assert context.max_elapsed_seconds == 300.0
+    assert captured["kb_budget"].limit == 12
 
 
 @pytest.mark.asyncio
@@ -464,7 +544,6 @@ async def test_executor_budget_on_second_attempt_stops_before_third(env):
     """第二次 attempt 预算超限：立即 BUDGET_EXCEEDED，不再发起第三次 attempt。"""
     settings, conn, session, run, publisher, executor = env
     executor._settings.agent_max_tool_calls = 1
-    executor._settings.agent_max_elapsed_seconds = 0
     batches = [
         [_model_end("第一轮文本")],
         [_tool_start("search_web", "r2", {"query": "budget"})],
@@ -480,6 +559,68 @@ async def test_executor_budget_on_second_attempt_stops_before_third(env):
     assert updated.error_code == "BUDGET_EXCEEDED"
     assert updated.report_artifact_id is not None
     assert stub._calls == 2
+
+
+@pytest.mark.asyncio
+async def test_executor_exploration_budget_reserves_ledger_and_submit(env):
+    """Batch C：探索达上限（max_tool_calls-2=4）后，get_evidence_ledger 与
+    submit_research_report 仍可执行并成功 → run SUCCEEDED，而非 BUDGET_EXCEEDED。"""
+    settings, conn, session, run, publisher, executor = env
+    run2 = Run(
+        session_id=session.session_id,
+        request=ResearchRequest(
+            question="测试问题：探索预算边界后收尾",
+            constraints=["max_tool_calls=6"],
+        ),
+    )
+    await RunRepository(conn).create(run2)
+    events = [
+        *_explore_events(4),
+        _tool_start("get_evidence_ledger", "lg1", {}),
+        _tool_end("get_evidence_ledger", "lg1", {"evidence": []}),
+        _tool_start("submit_research_report", "rp1", {"title": "t"}),
+        _tool_end("submit_research_report", "rp1", {"artifact_id": ARTIFACT_ID, "title": "t"}),
+    ]
+    stub = _StubAgent(events)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run2.run_id)
+
+    updated = await RunRepository(conn).get(run2.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    assert str(updated.report_artifact_id) == ARTIFACT_ID
+
+
+@pytest.mark.asyncio
+async def test_executor_exploration_budget_blocks_further_exploration(env):
+    """Batch C：探索达上限后再发起搜索 → 立即 BUDGET_EXCEEDED，不继续、不 retry。"""
+    settings, conn, session, run, publisher, executor = env
+    run2 = Run(
+        session_id=session.session_id,
+        request=ResearchRequest(
+            question="测试问题：探索超限停止漫游",
+            constraints=["max_tool_calls=6"],
+        ),
+    )
+    await RunRepository(conn).create(run2)
+    events = [
+        *_explore_events(4),
+        _tool_start("search_web", "sX", {"query": "over budget"}),
+    ]
+    stub = _SequenceStubAgent([events])
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run2.run_id)
+
+    updated = await RunRepository(conn).get(run2.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "BUDGET_EXCEEDED"
+    assert "exploration_budget" in updated.error_message
+    assert updated.report_artifact_id is not None
+    # 不发起 retry：第一次 attempt 即在探索超限处终止。
+    assert stub._calls == 1
 
 
 @pytest.mark.asyncio
@@ -720,7 +861,7 @@ async def test_executor_prefetch_not_ledger_but_model_record_writes_k(env, tmp_p
     # 预取阶段：账本无 K 证据。
     assert not any(item.source_type == "knowledge_base" for item in await store.list_for_run())
 
-    # 模型确认相关 → 经工具显式记录 → K 证据进账本。
+    # 模型确认相关 → 先经 search_knowledge_base 命中注册候选（同 run 搜索），再记录 K 证据。
     tools = {
         t.name: t
         for t in create_document_tools(
@@ -731,6 +872,8 @@ async def test_executor_prefetch_not_ledger_but_model_record_writes_k(env, tmp_p
             kb_budget=KbToolBudget(12),
         )
     }
+    found = await tools["search_knowledge_base"].ainvoke({"query": "DeepAgents"})
+    assert found["count"] == 1
     result = await tools["record_knowledge_base_evidence"].ainvoke(
         {
             "path": "notes.md",

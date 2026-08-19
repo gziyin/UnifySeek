@@ -190,11 +190,11 @@ async def test_default_false_still_degrades(env):
 
 
 async def test_executor_budget_exceeded_publishes_clean_degraded_report(executor_env):
-    """预算超限收敛：report.ready payload degraded=true 且 reason 含 budget_exceeded
-    （而非 ReportValidationError），降级 markdown 为干净降级产物。"""
+    """预算超限收敛（settings 收紧 profile，探索达上限 max_tool_calls-2）：report.ready
+    payload degraded=true 且 reason 含 budget_exceeded（而非 ReportValidationError），
+    降级 markdown 为干净降级产物。"""
     conn, run, executor = executor_env
-    executor._settings.agent_max_tool_calls = 2
-    executor._settings.agent_max_elapsed_seconds = 0
+    executor._settings.agent_max_tool_calls = 4
     events = [
         _tool_start("search_web", "r1", {"query": "DeepAgents"}),
         _tool_end("search_web", "r1", {"items": []}),
@@ -211,7 +211,7 @@ async def test_executor_budget_exceeded_publishes_clean_degraded_report(executor
     assert updated is not None
     assert updated.status == RunStatus.FAILED
     assert updated.error_code == "BUDGET_EXCEEDED"
-    assert "max_tool_calls" in updated.error_message
+    assert "exploration_budget" in updated.error_message
 
     db_events = await EventRepository(conn).list_after(run.run_id, 0)
     ready = [e for e in db_events if e.type == "report.ready"]

@@ -1,12 +1,104 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
 from ai_dev_researcher.domain.evidence import EvidenceRecord
 from ai_dev_researcher.repositories.evidence import EvidenceRepository
 from ai_dev_researcher.storage.paths import WorkspacePaths
+
+
+def _ranges_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    """Line ranges overlap; an empty range (no line info) matches anything in the file."""
+    a_empty = a_end < a_start or (a_start <= 0 and a_end <= 0)
+    b_empty = b_end < b_start or (b_start <= 0 and b_end <= 0)
+    if a_empty or b_empty:
+        return True
+    return max(a_start, b_start) <= min(a_end, b_end)
+
+
+@dataclass
+class KbCandidate:
+    """A search hit that authorizes a same-run KB record (batch-A-evidence-kb-gates)."""
+
+    path: str
+    line_start: int
+    line_end: int
+    score: float
+    evidence_id: str | None = None
+
+
+class KbCandidateRegistry:
+    """Run-scoped KB candidate registry.
+
+    ``search_knowledge_base`` hits whose score passes the relevance threshold are
+    registered here (by the factory tool wrapper). ``record_knowledge_base_evidence``
+    may only record a candidate that was searched in the SAME run (same path and
+    overlapping line range), so prefetch (which calls the impl directly, bypassing the
+    factory wrapper) can never authorize a record. Duplicate records of the same
+    candidate are idempotent: they return the already-recorded evidence_id.
+    """
+
+    def __init__(self, *, score_threshold: float = 0.3):
+        self._score_threshold = score_threshold
+        self._candidates: list[KbCandidate] = []
+
+    def register(
+        self, path: str, line_start: int, line_end: int, score: float
+    ) -> None:
+        if not path:
+            return
+        if score < self._score_threshold:
+            return
+        if self._find(path, line_start, line_end) is None:
+            self._candidates.append(
+                KbCandidate(
+                    path=path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    score=score,
+                )
+            )
+
+    def _find(self, path: str, line_start: int, line_end: int) -> KbCandidate | None:
+        for candidate in self._candidates:
+            if candidate.path == path and _ranges_overlap(
+                candidate.line_start, candidate.line_end, line_start, line_end
+            ):
+                return candidate
+        return None
+
+    def matches(self, path: str, line_start: int, line_end: int) -> bool:
+        return self._find(path, line_start, line_end) is not None
+
+    def recorded_evidence_id(
+        self, path: str, line_start: int, line_end: int
+    ) -> str | None:
+        candidate = self._find(path, line_start, line_end)
+        return candidate.evidence_id if candidate is not None else None
+
+    def mark_recorded(
+        self, path: str, line_start: int, line_end: int, evidence_id: str
+    ) -> None:
+        candidate = self._find(path, line_start, line_end)
+        if candidate is not None:
+            candidate.evidence_id = evidence_id
+        else:
+            self._candidates.append(
+                KbCandidate(
+                    path=path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    score=self._score_threshold,
+                    evidence_id=evidence_id,
+                )
+            )
+
+    @property
+    def recorded_count(self) -> int:
+        return sum(1 for c in self._candidates if c.evidence_id)
 
 
 class EvidenceStore:

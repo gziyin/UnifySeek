@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ai_dev_researcher.domain.runs import ResearchRequest
+from ai_dev_researcher.domain.runs import DEFAULT_OUTPUT_MODE, OutputMode, ResearchRequest
 
 
 def _make_request(question: str) -> ResearchRequest:
@@ -44,3 +44,30 @@ class TestResearchRequestQuestionValidation:
     def test_single_char_question_is_accepted(self) -> None:
         request = _make_request("a")
         assert request.question == "a"
+
+
+class TestResearchRequestOutputMode:
+    """output_mode 契约：默认 medium，显式值 short/medium/long。"""
+
+    def test_default_is_medium(self) -> None:
+        request = _make_request("q")
+        assert request.output_mode == DEFAULT_OUTPUT_MODE
+        assert request.output_mode == OutputMode.MEDIUM
+
+    def test_explicit_short(self) -> None:
+        request = ResearchRequest(question="q", output_mode="short")
+        assert request.output_mode == OutputMode.SHORT
+
+    def test_explicit_long_roundtrips_via_json(self) -> None:
+        request = ResearchRequest(question="q", output_mode=OutputMode.LONG)
+        dumped = request.model_dump(mode="json")
+        reparsed = ResearchRequest.model_validate(dumped)
+        assert reparsed.output_mode == OutputMode.LONG
+
+    def test_legacy_json_without_output_mode_defaults_to_medium(self) -> None:
+        request = ResearchRequest.model_validate({"question": "q"})
+        assert request.output_mode == OutputMode.MEDIUM
+
+    def test_invalid_output_mode_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ResearchRequest(question="q", output_mode="turbo")

@@ -22,6 +22,7 @@ async def _to_run_response(state: AppState, run) -> RunResponse:
         session_id=run.session_id,
         status=run.status,
         question=run.request.question,
+        output_mode=run.request.output_mode,
         created_at=run.created_at,
         started_at=run.started_at,
         finished_at=run.finished_at,

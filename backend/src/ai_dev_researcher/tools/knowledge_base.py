@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,7 +10,7 @@ from ai_dev_researcher.core.errors import KnowledgeBaseError
 from ai_dev_researcher.core.security import ensure_within_root
 from ai_dev_researcher.domain.evidence import EvidenceRecord
 from ai_dev_researcher.domain.sessions import utc_now
-from ai_dev_researcher.services.evidence_store import EvidenceStore
+from ai_dev_researcher.services.evidence_store import EvidenceStore, KbCandidateRegistry
 
 if TYPE_CHECKING:
     from ai_dev_researcher.storage.knowledge_index import KbChunk, KnowledgeIndex
@@ -25,23 +24,38 @@ KB_BUDGET_EXHAUSTED_GUIDANCE = (
     "未记录的知识库结论请记入 unknowns。"
 )
 
+K_EVIDENCE_LIMIT_EXCEEDED_GUIDANCE = (
+    "K 证据数量已达本模式上限（short 3 / medium 5 / long 8），请基于已记录的证据作答，"
+    "未记录的知识库结论请记入 unknowns。"
+)
 
-@dataclass
+
 class KbToolBudget:
-    """Run-scoped soft budget for KB tools (#13).
+    """Run-scoped soft budget for KB tools (#13) + K evidence cap + candidate gate (A2).
 
-    Counts model-invoked KB search/read/list calls. ``record_knowledge_base_evidence``
-    is exempt from the budget (#44): it is the only path that writes K evidence into
-    the ledger, so it must not be starved by read/list consumption. ``limit == 0``
-    means unlimited. Prefetch does not go through the tool wrappers, so it is never
-    counted here.
+    - ``limit``/``remaining``: model-invoked KB search/read/list soft budget.
+      ``record_knowledge_base_evidence`` is exempt from it (#44): it is the only path
+      that writes K evidence into the ledger, so it must not be starved by read/list
+      consumption. ``limit == 0`` means unlimited. Prefetch bypasses the tool wrappers
+      and is never counted here.
+    - ``k_evidence_limit``: cap on distinct K evidence records per run (profile-driven
+      short/medium/long=3/5/8; ``0`` means unlimited). Independent from the search budget.
+    - ``registry``: run-scoped search candidates. Only candidates searched in the same
+      run (registered by the factory search wrapper) authorize a record; prefetch
+      (direct impl call) registers nothing. Duplicate candidates are idempotent.
     """
 
-    limit: int
-    remaining: int = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.remaining = self.limit
+    def __init__(
+        self,
+        limit: int,
+        *,
+        k_evidence_limit: int = 0,
+        k_score_threshold: float = 0.3,
+    ):
+        self.limit = limit
+        self.remaining = limit
+        self.k_evidence_limit = k_evidence_limit
+        self.registry = KbCandidateRegistry(score_threshold=k_score_threshold)
 
     def acquire(self) -> bool:
         if self.limit <= 0:
@@ -50,6 +64,43 @@ class KbToolBudget:
             return False
         self.remaining -= 1
         return True
+
+    # -- run-scoped candidate gate (A2) --
+
+    def register_candidate(
+        self, path: str, line_start: int, line_end: int, score: float
+    ) -> None:
+        self.registry.register(path, line_start, line_end, score)
+
+    def matches_candidate(self, path: str, line_start: int, line_end: int) -> bool:
+        return self.registry.matches(path, line_start, line_end)
+
+    def recorded_evidence_id(
+        self, path: str, line_start: int, line_end: int
+    ) -> str | None:
+        return self.registry.recorded_evidence_id(path, line_start, line_end)
+
+    def mark_recorded(
+        self, path: str, line_start: int, line_end: int, evidence_id: str
+    ) -> None:
+        self.registry.mark_recorded(path, line_start, line_end, evidence_id)
+
+    @property
+    def recorded_count(self) -> int:
+        return self.registry.recorded_count
+
+    def can_record(
+        self, path: str, line_start: int, line_end: int
+    ) -> tuple[bool, str | None]:
+        """Return (ok, reason): reason is 'candidate_rejected' or 'k_evidence_limit'."""
+        if not self.registry.matches(path, line_start, line_end):
+            return False, "candidate_rejected"
+        if (
+            self.k_evidence_limit > 0
+            and self.registry.recorded_count >= self.k_evidence_limit
+        ):
+            return False, "k_evidence_limit"
+        return True, None
 
 
 # Deprecated compatibility API for out-of-domain tests. Production wiring now
@@ -193,6 +244,7 @@ async def record_knowledge_base_evidence_impl(
     excerpt: str,
     line_start: int,
     line_end: int,
+    kb_guard: KbToolBudget | None = None,
 ) -> dict:
     root = _kb_root(context)
     relative = _safe_relative(context, path)
@@ -200,6 +252,36 @@ async def record_knowledge_base_evidence_impl(
     target = ensure_within_root(root / relative, root)
     if not target.exists() or not target.is_file():
         raise KnowledgeBaseError(f"file not found: {path}")
+
+    if kb_guard is not None:
+        # 重复候选幂等：同路径 + 重叠行号已记录 → 返回既有 evidence_id，不重复落账本。
+        existing_id = kb_guard.recorded_evidence_id(relative, line_start, line_end)
+        if existing_id is not None:
+            return {
+                "evidence_id": existing_id,
+                "note": "duplicate",
+                "path": relative,
+                "line_start": line_start,
+                "line_end": line_end,
+            }
+        ok, reason = kb_guard.can_record(relative, line_start, line_end)
+        if not ok:
+            if reason == "k_evidence_limit":
+                return {
+                    "note": "budget_exceeded",
+                    "guidance": K_EVIDENCE_LIMIT_EXCEEDED_GUIDANCE,
+                    "path": relative,
+                }
+            return {
+                "note": "candidate_rejected",
+                "guidance": (
+                    "record_knowledge_base_evidence 只能记录本 run 内 "
+                    "search_knowledge_base 命中且满足相关性阈值（相同路径 + 重叠行号）的候选；"
+                    "请先调用 search_knowledge_base 定位相关片段后再记录。"
+                ),
+                "path": relative,
+            }
+
     evidence_id = await store.allocate_knowledge_base_id()
     locator = f"kb:{relative} lines {line_start}-{line_end}"
     record = EvidenceRecord(
@@ -217,7 +299,10 @@ async def record_knowledge_base_evidence_impl(
         retrieved_at=utc_now(),
     )
     await store.add(record)
+    if kb_guard is not None:
+        kb_guard.mark_recorded(relative, line_start, line_end, evidence_id)
     return {
+        "note": "ok",
         "evidence_id": evidence_id,
         "locator": locator,
         "path": relative,

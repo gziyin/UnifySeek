@@ -22,7 +22,11 @@ from ai_dev_researcher.services.evidence_store import EvidenceStore
 from ai_dev_researcher.storage.knowledge_index import KbChunk
 from ai_dev_researcher.storage.paths import WorkspacePaths
 from ai_dev_researcher.tools.factory import create_document_tools
-from ai_dev_researcher.tools.knowledge_base import KB_BUDGET_EXHAUSTED_GUIDANCE, KbToolBudget
+from ai_dev_researcher.tools.knowledge_base import (
+    KB_BUDGET_EXHAUSTED_GUIDANCE,
+    KbToolBudget,
+    search_knowledge_base_impl,
+)
 
 ARTIFACT_ID = "851a4589-edee-470e-9732-0ee5548fa5b7"
 
@@ -251,25 +255,41 @@ async def test_kb_tool_budget_covers_all_kb_tools(tmp_path: Path):
         paths=paths,
         settings=settings,
     )
+    index = _RecordingIndex(
+        [
+            {
+                "file_path": "notes.md",
+                "symbol": "notes",
+                "parent_symbol": "",
+                "kind": "doc",
+                "line_start": 1,
+                "line_end": 3,
+                "score": 0.9,
+                "text": "content",
+            }
+        ]
+    )
     tools = {
         t.name: t
         for t in create_document_tools(
             context,
             store=store,
             artifacts=object(),
-            knowledge_index=_RecordingIndex(),
-            kb_budget=KbToolBudget(settings.kb_max_tool_calls),
+            knowledge_index=index,
+            kb_budget=KbToolBudget(settings.kb_max_tool_calls, k_evidence_limit=5),
         )
     }
 
-    allowed = await tools["list_knowledge_base_entries"].ainvoke({"path": "."})
-    assert any(e["name"] == "notes.md" for e in allowed["entries"])
+    # 先 search：命中候选并注册（消耗唯一一次 search 预算）。
+    found = await tools["search_knowledge_base"].ainvoke({"query": "notes"})
+    assert found["count"] == 1
 
+    # 预算已耗尽：list/read 被短路。
     read = await tools["read_knowledge_base_file"].ainvoke({"path": "notes.md"})
     assert read["note"] == "budget_exceeded"
     assert read["text"] == ""
 
-    # #44：record 豁免 KB 软预算 —— 即使 search/read/list 已耗尽预算仍成功落账本。
+    # #44：record 豁免 KB 软预算 —— 即使 search/read/list 已耗尽预算，绑定候选后仍成功落账本。
     record = await tools["record_knowledge_base_evidence"].ainvoke(
         {
             "path": "notes.md",
@@ -283,6 +303,20 @@ async def test_kb_tool_budget_covers_all_kb_tools(tmp_path: Path):
     assert record["evidence_id"].startswith("K")
     ledger = await store.list_for_run()
     assert any(item.source_type == "knowledge_base" for item in ledger)
+
+    # 重复候选幂等：同候选再次 record 返回同一 evidence_id（note=duplicate），账本不增。
+    duplicate = await tools["record_knowledge_base_evidence"].ainvoke(
+        {
+            "path": "notes.md",
+            "title": "t",
+            "excerpt": "e",
+            "line_start": 1,
+            "line_end": 2,
+        }
+    )
+    assert duplicate["note"] == "duplicate"
+    assert duplicate["evidence_id"] == record["evidence_id"]
+    assert len(await store.list_for_run()) == 1
 
     listing = await tools["list_knowledge_base_entries"].ainvoke({"path": "."})
     assert listing["note"] == "budget_exceeded"
@@ -440,9 +474,13 @@ async def test_executor_record_still_writes_k_after_budget_exhausted(env):
 
 
 async def test_executor_kb_budget_wired_via_di(env):
-    """预算对象由 executor 创建并经 DI 注入 create_research_agent（run 级）。"""
+    """预算对象由 executor 创建并经 DI 注入 create_research_agent（run 级，取 output_mode profile）。"""
     settings, conn, session, run, publisher, executor = env
-    executor._settings.kb_max_tool_calls = 5
+    run2 = Run(
+        session_id=session.session_id,
+        request=ResearchRequest(question="short mode kb budget", output_mode="short"),
+    )
+    await RunRepository(conn).create(run2)
     captured = {}
     events = [
         _tool_start("search_web", "r1", {"query": "DeepAgents"}),
@@ -464,12 +502,38 @@ async def test_executor_kb_budget_wired_via_di(env):
         "ai_dev_researcher.services.agent_executor.create_research_agent",
         side_effect=_fake_create,
     ):
-        await executor(run.run_id)
+        await executor(run2.run_id)
 
     budget = captured["kb_budget"]
     assert isinstance(budget, KbToolBudget)
-    assert budget.limit == 5
-    assert budget.remaining == 5
+    # short 模式 profile 初始值：KB 6 + K 证据上限 3。
+    assert budget.limit == 6
+    assert budget.remaining == 6
+    assert budget.k_evidence_limit == 3
+
+
+async def test_executor_k_evidence_wired_from_medium_profile(env):
+    """默认 medium 模式：K 证据上限 5 随 KbToolBudget 注入。"""
+    settings, conn, session, run, publisher, executor = env
+    captured = {}
+    events = [
+        _tool_start("submit_research_report", "r2", {"title": "t"}),
+        _tool_end("submit_research_report", "r2", {"artifact_id": ARTIFACT_ID, "title": "t"}),
+    ]
+    stub = _StubAgent(events)
+
+    def _fake_create(context, model_binding, store, artifacts, vector_store=None, knowledge_index=None, kb_budget=None):
+        captured["kb_budget"] = kb_budget
+        return stub
+
+    with patch(
+        "ai_dev_researcher.services.agent_executor.create_research_agent",
+        side_effect=_fake_create,
+    ):
+        await executor(run.run_id)
+
+    budget = captured["kb_budget"]
+    assert budget.k_evidence_limit == 5
 
 
 async def test_executor_kb_prefetch_empty_skips_context_and_evidence(env, tmp_path: Path):
@@ -522,6 +586,140 @@ def test_settings_kb_max_tool_calls(monkeypatch, tmp_path: Path):
     assert Settings(workspace_root=tmp_path / "ws", kb_max_tool_calls=3).kb_max_tool_calls == 3
     monkeypatch.setenv("KB_MAX_TOOL_CALLS", "7")
     assert Settings(workspace_root=tmp_path / "ws").kb_max_tool_calls == 7
+
+
+# ---------------------------------------------------------------------------
+# 闸门 4：候选注册 run-scoped（预取不授权 record）+ 重复候选不重复发布账本事件
+# ---------------------------------------------------------------------------
+
+
+async def test_only_factory_search_registers_candidate_for_record(tmp_path: Path):
+    """预取（direct impl）不注册候选：record 被拒；工厂 search 工具注册候选后 record 成功。"""
+    kb_root = tmp_path / "kb"
+    kb_root.mkdir(parents=True)
+    (kb_root / "notes.md").write_text("# Notes\n\ncontent\n", encoding="utf-8")
+    settings = Settings(
+        workspace_root=tmp_path / "ws",
+        knowledge_base_root=kb_root,
+        fake_agent_mode=True,
+    )
+    settings.workspace_root.mkdir(parents=True, exist_ok=True)
+    paths = WorkspacePaths(settings.sessions_root, knowledge_base_root=kb_root)
+    conn = await connect(str(settings.db_path))
+    await init_db(conn)
+    session_id = uuid4()
+    run_id = uuid4()
+    paths.ensure_run_layout(session_id, run_id)
+    store = EvidenceStore(
+        run_id=run_id,
+        session_id=session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=paths,
+    )
+    context = RunContext(
+        run_id=run_id,
+        session_id=session_id,
+        question="q",
+        uploaded_artifact_ids=[],
+        max_web_sources=5,
+        paths=paths,
+        settings=settings,
+    )
+    index = _RecordingIndex(
+        [
+            {
+                "file_path": "notes.md",
+                "symbol": "notes",
+                "parent_symbol": "",
+                "kind": "doc",
+                "line_start": 1,
+                "line_end": 3,
+                "score": 0.9,
+                "text": "content",
+            }
+        ]
+    )
+    guard = KbToolBudget(limit=10, k_evidence_limit=0)
+    tools = {
+        t.name: t
+        for t in create_document_tools(
+            context,
+            store=store,
+            artifacts=object(),
+            knowledge_index=index,
+            kb_budget=guard,
+        )
+    }
+
+    async def _record() -> dict:
+        return await tools["record_knowledge_base_evidence"].ainvoke(
+            {
+                "path": "notes.md",
+                "title": "t",
+                "excerpt": "e",
+                "line_start": 1,
+                "line_end": 2,
+            }
+        )
+
+    # 1) 预取路径：executor 直调 impl（不经工厂工具），不注册候选。
+    await search_knowledge_base_impl(query="notes", knowledge_index=index)
+    blocked = await _record()
+    assert blocked["note"] == "candidate_rejected"
+    assert await store.list_for_run() == []
+
+    # 2) 工厂 search 工具：注册候选（路径+行号重叠+阈值）。
+    found = await tools["search_knowledge_base"].ainvoke({"query": "notes"})
+    assert found["count"] == 1
+    ok = await _record()
+    assert ok["evidence_id"].startswith("K")
+    assert "candidate_rejected" not in (ok.get("note") or "")
+    assert len(await store.list_for_run()) == 1
+    await conn.close()
+
+
+async def test_executor_duplicate_record_does_not_publish_dup_ledger_events(env):
+    """重复候选记录（note=duplicate）不发布 source.discovered / evidence.recorded 账本事件。"""
+    settings, conn, session, run, publisher, executor = env
+    events = [
+        _tool_start("record_knowledge_base_evidence", "r1", {"path": "notes.md"}),
+        _tool_end(
+            "record_knowledge_base_evidence",
+            "r1",
+            {
+                "evidence_id": "K1",
+                "locator": "kb:notes.md lines 1-2",
+                "path": "notes.md",
+                "line_start": 1,
+                "line_end": 2,
+                "excerpt": "e",
+                "note": "duplicate",
+            },
+        ),
+        _tool_start("submit_research_report", "r2", {"title": "t"}),
+        _tool_end("submit_research_report", "r2", {"artifact_id": ARTIFACT_ID, "title": "t"}),
+    ]
+    stub = _StubAgent(events)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    db_events = await EventRepository(conn).list_after(run.run_id, 0)
+    discovered = [
+        e
+        for e in db_events
+        if e.type == "source.discovered" and e.payload.get("source_type") == "knowledge_base"
+    ]
+    recorded_events = [
+        e
+        for e in db_events
+        if e.type == "evidence.recorded" and e.payload.get("source_type") == "knowledge_base"
+    ]
+    assert discovered == []
+    assert recorded_events == []
 
 
 async def _event_types(conn, run_id) -> list[str]:

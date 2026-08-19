@@ -138,9 +138,12 @@ def create_document_tools(
     ) -> dict:
         # #44：record 不消耗 KB 软预算（search/read/list 仍计）；K 证据是模型将
         # 预检/检索结果落账本的唯一途径，必须保证预算耗尽时仍能记录。
+        # A2：record 只能记录本 run 内 search 命中且满足阈值的候选（candidate gate），
+        # 重复候选幂等、K 证据数量受 profile 上限约束。
         return await record_knowledge_base_evidence_impl(
             context=context,
             store=store,
+            kb_guard=kb_budget,
             path=path,
             title=title,
             excerpt=excerpt,
@@ -176,13 +179,26 @@ def create_document_tools(
         threshold = context.settings.kb_prefetch_score_threshold
         if score_threshold is not None:
             threshold = max(float(score_threshold), threshold)
-        return await search_knowledge_base_impl(
+        result = await search_knowledge_base_impl(
             query=query,
             path=path,
             top_k=top_k,
             score_threshold=threshold,
             knowledge_index=knowledge_index,
         )
+        # A2：把本 run 内搜索命中且满足阈值的片段注册为 record 的候选（run-scoped）。
+        # 预取直调 impl（不经本工具）不会注册，故预取不能授权 record。
+        if kb_budget is not None:
+            for item in result.get("results") or []:
+                score = float(item.get("score") or 0.0)
+                if score >= threshold:
+                    kb_budget.register_candidate(
+                        item.get("file_path") or "",
+                        int(item.get("line_start") or 0),
+                        int(item.get("line_end") or 0),
+                        score,
+                    )
+        return result
 
     return [
         StructuredTool.from_function(

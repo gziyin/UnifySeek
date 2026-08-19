@@ -11,10 +11,11 @@ from ai_dev_researcher.agents.prompts import (
     build_orchestrator_prompt,
 )
 from ai_dev_researcher.core.config import Settings
+from ai_dev_researcher.domain.runs import DEFAULT_OUTPUT_MODE, OutputMode
 from ai_dev_researcher.storage.paths import WorkspacePaths
 
 
-def _context(tmp_path: Path) -> RunContext:
+def _context(tmp_path: Path, output_mode: OutputMode = DEFAULT_OUTPUT_MODE) -> RunContext:
     settings = Settings(workspace_root=tmp_path / "ws", fake_agent_mode=True)
     paths = WorkspacePaths(settings.sessions_root)
     return RunContext(
@@ -25,6 +26,7 @@ def _context(tmp_path: Path) -> RunContext:
         max_web_sources=5,
         paths=paths,
         settings=settings,
+        output_mode=output_mode,
     )
 
 
@@ -49,6 +51,51 @@ def test_orchestrator_prompt_mandates_kb_record_when_prefetch_relevant(tmp_path:
     assert "search_knowledge_base" in prompt
     assert "read_knowledge_base_file" in prompt
     assert "未调用 search_web 前，禁止调用 submit_research_report" in prompt
+
+
+def test_orchestrator_prompt_renders_output_mode_soft_targets(tmp_path: Path):
+    """output_mode 注入 prompt：模式、软目标数值、优先级与预算收束指引都在。"""
+    prompt = build_orchestrator_prompt(_context(tmp_path, OutputMode.SHORT))
+    assert "调研输出模式：short" in prompt
+    # 软目标（非硬性上限）数值来自 short profile：120s / 24 次 / 6 次 KB。
+    assert "120" in prompt
+    assert "24 次" in prompt
+    assert "6 次" in prompt
+    # short 内容软目标：1200-1800 字 / 2-4 章 / 2-3 条建议；三档统一 2-4 条核心结论。
+    assert "1200-1800" in prompt
+    assert "2-4 个章节" in prompt
+    assert "2-3 条行动建议" in prompt
+    assert "三档统一 2-4 条" in prompt
+    # 软性措辞 + 质量优先级 + 预算收束 + 不机械截断。
+    assert "软目标" in prompt
+    assert "结论完整性与证据引用" in prompt
+    assert "unknowns" in prompt
+    assert "不要继续搜索或发起重试" in prompt
+    assert "不做机械式截断" in prompt
+    assert "硬性字数/章节上限" in prompt
+    # 所有模式都作用于网页、上传文档与知识库深度。
+    assert "均覆盖网页调研、上传文档与本地知识库三类来源" in prompt
+
+
+def test_orchestrator_prompt_mode_profile_variants(tmp_path: Path):
+    """medium/long 分别注入对应 profile 的软目标数值与内容篇幅目标。"""
+    medium_prompt = build_orchestrator_prompt(
+        _context(tmp_path, OutputMode.MEDIUM)
+    )
+    long_prompt = build_orchestrator_prompt(_context(tmp_path, OutputMode.LONG))
+    assert "调研输出模式：medium" in medium_prompt
+    assert "40 次" in medium_prompt
+    assert "2500-4000" in medium_prompt
+    assert "3-6 个章节" in medium_prompt
+    assert "2-5 条行动建议" in medium_prompt
+    assert "调研输出模式：long" in long_prompt
+    assert "60 次" in long_prompt
+    assert "5000-8000" in long_prompt
+    assert "5-8 个章节" in long_prompt
+    assert "3-7 条行动建议" in long_prompt
+    # 三档统一：核心结论始终 2-4 条（短中长一致）。
+    assert "三档统一 2-4 条" in medium_prompt
+    assert "三档统一 2-4 条" in long_prompt
 
 
 def test_document_analyst_prompt_mandates_record_on_high_score():

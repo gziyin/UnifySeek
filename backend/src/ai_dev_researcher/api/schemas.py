@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from ai_dev_researcher.domain.runs import ResearchRequest, RunStatus
+from ai_dev_researcher.domain.runs import OutputMode, ResearchRequest, RunStatus
 
 
 class ErrorResponse(BaseModel):
@@ -43,6 +43,7 @@ class RunResponse(BaseModel):
     session_id: UUID
     status: RunStatus
     question: str
+    output_mode: OutputMode
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None

@@ -1,6 +1,66 @@
 from __future__ import annotations
 
 from ai_dev_researcher.agents.context import RunContext
+from ai_dev_researcher.core.output_profiles import get_output_profile
+
+
+CONTENT_TARGETS: dict[str, dict[str, object]] = {
+    "short": {
+        "label": "聚焦快查，核心结论优先",
+        "words": (1200, 1800),
+        "sections": (2, 4),
+        "recommendations": (2, 3),
+    },
+    "medium": {
+        "label": "均衡覆盖，主维度齐全",
+        "words": (2500, 4000),
+        "sections": (3, 6),
+        "recommendations": (2, 5),
+    },
+    "long": {
+        "label": "深度广延，来源与章节最全",
+        "words": (5000, 8000),
+        "sections": (5, 8),
+        "recommendations": (3, 7),
+    },
+}
+
+
+def _output_mode_guidance(context: RunContext) -> str:
+    """Soft-target guidance rendered from the run's output_mode profile.
+
+    预算数值与篇幅/章节目标仅在提示词中作为「节奏参考」，不是硬性截断依据：报告不按
+    字数/章节机械式截断，超限由 executor 的 BUDGET_EXCEEDED 收敛链处理（不继续搜索 /
+    不 retry）。所有模式都作用于网页、上传文档与本地知识库三类来源，仅深度与广度不同。
+    """
+    profile = get_output_profile(context.output_mode)
+    mode = context.output_mode
+    target = CONTENT_TARGETS[mode.value]
+    words_min, words_max = target["words"]  # type: ignore[misc]
+    sections_min, sections_max = target["sections"]  # type: ignore[misc]
+    recs_min, recs_max = target["recommendations"]  # type: ignore[misc]
+    return f"""调研输出模式：{mode.value}
+
+节奏参考（软目标，非硬性上限）：
+- 资源：本次约 {profile.max_elapsed_seconds:.0f} 秒 / {profile.max_tool_calls} 次工具调用 /
+  {profile.kb_max_tool_calls} 次知识库检索。
+- 内容：约 {words_min}-{words_max} 字正文、{sections_min}-{sections_max} 个章节、
+  {recs_min}-{recs_max} 条行动建议；核心结论（summary_claims）三档统一 2-4 条。
+- 模式差异：{target["label"]}。
+- 覆盖面：short/medium/long 均覆盖网页调研、上传文档与本地知识库三类来源，
+  仅深度与广度不同——short 聚焦最少必要来源，medium 均衡展开，long 允许最多来源
+  与更完整的章节、对比与结论。
+- 探索与收尾：探索（搜索/提取/知识库检索/读取/列出/记录证据）预算约为
+  {profile.max_tool_calls - profile.reserve} 次，为收尾保留最后 {profile.reserve} 次调用
+  （get_evidence_ledger 核对账本 + submit_research_report 提交报告）；接近探索上限时
+  立即停止探索，核对账本并提交报告，不要发起新的探索或重试。
+
+节奏与取舍（据此调整调研广度与深度，不必机械对齐数值）：
+- 质量优先级（预算有限时的取舍顺序）：结论完整性与证据引用 > 来源数量 > 格式细节；
+  无法验证的结论必须如实写入 unknowns，宁缺毋滥、不臆造。
+- 到达预算后不要继续搜索或发起重试：基于当前证据账本立即收束，调用 submit_research_report
+  提交报告；报告不做机械式截断，在给定预算内自然收尾。
+- 报告内容本身不设硬性字数/章节上限，请完整覆盖研究问题的主要维度，再把核心结论提炼进 summary_claims。"""
 
 
 def build_orchestrator_prompt(context: RunContext) -> str:
@@ -25,6 +85,8 @@ def build_orchestrator_prompt(context: RunContext) -> str:
 
 授权上传资料 artifact IDs：{uploads}
 最大网页来源数：{context.max_web_sources}
+
+{_output_mode_guidance(context)}
 
 本地知识库预检索片段（仅供判断与知识库主题是否相关，未写入证据账本；预检片段不得直接作为报告引用来源。凡报告要引用知识库内容，必须委托 document-analyst 用 search_knowledge_base / read_knowledge_base_file 定位精读后，经 record_knowledge_base_evidence 记录 K 证据，citation 必须指向 K 类证据 ID）：
 {knowledge_context or "- 无预检知识库片段"}

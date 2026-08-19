@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from uuid import UUID
 
 from ai_dev_researcher.core.config import Settings
+from ai_dev_researcher.domain.runs import DEFAULT_OUTPUT_MODE, OutputMode
 from ai_dev_researcher.storage.paths import WorkspacePaths
 
 
@@ -20,4 +21,5 @@ class RunContext:
     focus_areas: list[str] = field(default_factory=list)
     max_tool_calls: int = 0
     max_elapsed_seconds: float = 0.0
+    output_mode: OutputMode = DEFAULT_OUTPUT_MODE
     knowledge_context: str = ''

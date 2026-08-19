@@ -9,6 +9,7 @@ from ai_dev_researcher.core.errors import (
     RunNotFoundError,
     SessionNotFoundError,
 )
+from ai_dev_researcher.core.output_profiles import resolve_run_budget
 from ai_dev_researcher.domain.artifacts import ArtifactKind
 from ai_dev_researcher.domain.runs import ResearchRequest, Run, RunStatus, TERMINAL_RUN_STATUSES
 from ai_dev_researcher.domain.sessions import make_slug, utc_now
@@ -93,24 +94,15 @@ class RunService:
         return run
 
     def _hard_run_timeout(self, run: Run) -> float:
-        """TaskManager 硬超时 = run 总预算（含 constraints 覆盖）+ grace。
+        """TaskManager 硬超时 = run 总预算（mode profile + settings 收紧 + constraints 覆盖）+ grace。
 
         总预算为 0（不限制）时返回 0 表示禁用硬超时，与 executor 内总预算语义一致。
         """
         if self._settings is None:
             return 0.0
-        max_elapsed = self._settings.agent_max_elapsed_seconds
-        for constraint in run.request.constraints:
-            stripped = constraint.strip()
-            for sep in ("=", ":"):
-                if sep not in stripped:
-                    continue
-                key, value = (part.strip() for part in stripped.split(sep, 1))
-                if key == "max_elapsed_seconds":
-                    try:
-                        max_elapsed = max(0.0, float(value))
-                    except ValueError:
-                        pass
+        max_elapsed = resolve_run_budget(
+            run.request.output_mode, run.request.constraints, self._settings
+        ).max_elapsed_seconds
         if not max_elapsed:
             return 0.0
         return max_elapsed + self._settings.agent_hard_timeout_grace_seconds

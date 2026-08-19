@@ -20,6 +20,15 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class OutputMode(StrEnum):
+    SHORT = "short"
+    MEDIUM = "medium"
+    LONG = "long"
+
+
+DEFAULT_OUTPUT_MODE = OutputMode.MEDIUM
+
+
 ACTIVE_RUN_STATUSES = {
     RunStatus.PENDING,
     RunStatus.RUNNING,
@@ -51,6 +60,7 @@ class ResearchRequest(BaseModel):
     constraints: list[str] = Field(default_factory=list, max_length=10)
     focus_areas: list[str] = Field(default_factory=list, max_length=10)
     max_web_sources: int = Field(default=8, ge=3, le=15)
+    output_mode: OutputMode = DEFAULT_OUTPUT_MODE
     uploaded_artifact_ids: list[UUID] = Field(default_factory=list, max_length=5)
 
     @field_validator("question")
