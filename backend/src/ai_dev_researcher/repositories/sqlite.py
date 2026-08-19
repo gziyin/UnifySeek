@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS evidence (
     PRIMARY KEY (run_id, evidence_id)
 );
 
+-- 并发安全的证据 ID 预留（A1：Evidence ID 原子分配）。
+-- 每 (run_id, source_type) 一行，source_type 为单字母前缀（S=web/D=document/K=knowledge_base），
+-- next_value 表示「已预留的最大数字后缀」；allocate_ids 以单条 INSERT..ON CONFLICT..RETURNING
+-- 原子自增预留，允许 ID 空洞、杜绝并发重复。
+CREATE TABLE IF NOT EXISTS evidence_sequences (
+    run_id TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    next_value INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (run_id, source_type)
+);
+
 CREATE TABLE IF NOT EXISTS events (
     event_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
