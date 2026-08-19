@@ -126,6 +126,52 @@ export function clampElapsed(prev: number | undefined, computed: number): number
  */
 const evTs = (event: ResearchEvent): number => Date.parse(event.occurred_at) || 0;
 
+type SourceEntry = RunViewState["sources"][number];
+
+/**
+ * batch B 账本去重：对 source.discovered 按 evidence_id 做 upsert。
+ * - 缺失/空白 evidence_id 的事件直接忽略，不入账本；
+ * - 首次出现时追加，位置保持不变；
+ * - 已存在时原位合并：后续非空字段补全/替换，空字段（undefined/null/""）永不擦除已有值。
+ * 仅影响 sources；不改事件 seq 去重、阶段计时、报告状态或事件协议。
+ */
+function upsertSource(sources: RunViewState["sources"], event: ResearchEvent): RunViewState["sources"] {
+  const payload = event.payload as Record<string, any>;
+  const evidenceId = payload.evidence_id != null ? String(payload.evidence_id).trim() : "";
+  if (!evidenceId) {
+    return sources;
+  }
+  const incoming: SourceEntry = {
+    evidence_id: evidenceId,
+    source_type: String(payload.source_type ?? ""),
+    title: String(payload.title ?? ""),
+    evidence_level: String(payload.evidence_level ?? ""),
+    url: payload.url != null ? String(payload.url) : undefined,
+    path: payload.path != null ? String(payload.path) : undefined,
+    locator: payload.locator != null ? String(payload.locator) : undefined,
+    query: payload.query != null ? String(payload.query) : undefined,
+    line_start: payload.line_start ?? undefined,
+    line_end: payload.line_end ?? undefined,
+    page: payload.page ?? undefined,
+    excerpt: payload.excerpt != null ? String(payload.excerpt) : undefined,
+  };
+  const idx = sources.findIndex((s) => s.evidence_id === evidenceId);
+  if (idx === -1) {
+    return [...sources, incoming];
+  }
+  const merged: SourceEntry = { ...sources[idx] };
+  const mergedAny = merged as Record<string, unknown>;
+  for (const key of Object.keys(incoming) as Array<keyof SourceEntry>) {
+    const value = incoming[key];
+    if (value !== "" && value != null) {
+      mergedAny[key] = value;
+    }
+  }
+  const next = [...sources];
+  next[idx] = merged;
+  return next;
+}
+
 /** 事件 → 大阶段映射（依据 Agent 内部执行流程）。submit_research_report 归入报告阶段。 */
 function phaseForEvent(event: ResearchEvent): PhaseKey | null {
   const type = event.type;
@@ -275,7 +321,7 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
       merged.sort((a, b) => a.seq - b.seq);
       const lastSeq = merged.reduce((max, item) => Math.max(max, item.seq), state.lastSeq);
       const todos = [...state.todos];
-      const sources = [...state.sources];
+      let sources = [...state.sources];
       let reportArtifactId = state.reportArtifactId;
       let reportDegraded = state.reportDegraded;
       let reportReason = state.reportReason;
@@ -294,22 +340,7 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
           todos.splice(0, todos.length, ...(event.payload.items as RunViewState["todos"]));
         }
         if (event.type === "source.discovered") {
-          sources.push({
-            evidence_id: String(event.payload.evidence_id ?? ""),
-            source_type: String(event.payload.source_type ?? ""),
-            title: String(event.payload.title ?? ""),
-            evidence_level: String(event.payload.evidence_level ?? ""),
-            url: event.payload.url != null ? String(event.payload.url) : undefined,
-            path: event.payload.path != null ? String(event.payload.path) : undefined,
-            locator:
-              event.payload.locator != null ? String(event.payload.locator) : undefined,
-            query: event.payload.query != null ? String(event.payload.query) : undefined,
-            line_start: event.payload.line_start ?? undefined,
-            line_end: event.payload.line_end ?? undefined,
-            page: event.payload.page ?? undefined,
-            excerpt:
-              event.payload.excerpt != null ? String(event.payload.excerpt) : undefined,
-          });
+          sources = upsertSource(sources, event);
         }
         // 契约：report.ready 事件 payload 含 artifact_id + degraded（冻结字段名，前端只做消费适配）。
         if (event.type === "report.ready" || event.type === "run.succeeded") {

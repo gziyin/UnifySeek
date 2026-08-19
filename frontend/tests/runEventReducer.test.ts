@@ -102,6 +102,148 @@ describe("runEventReducer sources", () => {
   });
 });
 
+describe("runEventReducer source upsert by evidence_id (batch B ledger dedupe)", () => {
+  it("repeated K within one dispatch appears once with merged fields", () => {
+    const state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent(
+          "source.discovered",
+          { evidence_id: "K1", source_type: "knowledge_base", title: "a", url: "u1" },
+          1,
+        ),
+        makeEvent(
+          "source.discovered",
+          { evidence_id: "K1", source_type: "knowledge_base", title: "b", url: "" },
+          2,
+        ),
+        makeEvent(
+          "source.discovered",
+          { evidence_id: "K1", source_type: "knowledge_base", title: "c" },
+          3,
+        ),
+      ],
+    });
+    expect(state.sources).toHaveLength(1);
+    expect(state.sources[0]).toMatchObject({
+      evidence_id: "K1",
+      title: "c",
+      url: "u1",
+    });
+  });
+
+  it("repeats across dispatches collapse to one entry, first position kept", () => {
+    const first = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent(
+          "source.discovered",
+          { evidence_id: "K1", source_type: "knowledge_base", title: "t" },
+          1,
+        ),
+        makeEvent("source.discovered", { evidence_id: "S1", source_type: "web", url: "u" }, 2),
+      ],
+    });
+    const state = runEventReducer(first, {
+      type: "events",
+      events: [
+        makeEvent(
+          "source.discovered",
+          { evidence_id: "K1", source_type: "knowledge_base", title: "t-updated" },
+          3,
+        ),
+        makeEvent("source.discovered", { evidence_id: "S2", source_type: "web" }, 4),
+      ],
+    });
+    expect(state.sources.map((s) => s.evidence_id)).toEqual(["K1", "S1", "S2"]);
+    expect(state.sources[0].title).toBe("t-updated");
+  });
+
+  it("ignores source.discovered without a non-empty evidence_id", () => {
+    const noId = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [makeEvent("source.discovered", { title: "orphan" }, 1)],
+    });
+    expect(noId.sources).toHaveLength(0);
+
+    const emptyId = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [makeEvent("source.discovered", { evidence_id: "", title: "orphan" }, 1)],
+    });
+    expect(emptyId.sources).toHaveLength(0);
+  });
+
+  it("empty later fields never erase existing values", () => {
+    const state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent(
+          "source.discovered",
+          {
+            evidence_id: "K1",
+            source_type: "knowledge_base",
+            title: "x.py",
+            path: "deepagents-0.6.2/x.py",
+            line_start: 1,
+            line_end: 2,
+          },
+          1,
+        ),
+        makeEvent(
+          "source.discovered",
+          {
+            evidence_id: "K1",
+            source_type: "",
+            title: "",
+            path: null,
+            line_start: null,
+            line_end: null,
+          },
+          2,
+        ),
+      ],
+    });
+    expect(state.sources).toHaveLength(1);
+    expect(state.sources[0]).toMatchObject({
+      source_type: "knowledge_base",
+      title: "x.py",
+      path: "deepagents-0.6.2/x.py",
+      line_start: 1,
+      line_end: 2,
+    });
+  });
+
+  it("non-empty later fields fill missing previous fields in place", () => {
+    const state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent(
+          "source.discovered",
+          { evidence_id: "K1", source_type: "knowledge_base", title: "t" },
+          1,
+        ),
+        makeEvent(
+          "source.discovered",
+          {
+            evidence_id: "K1",
+            source_type: "knowledge_base",
+            title: "t",
+            excerpt: "def x(): pass",
+            query: "kb search",
+          },
+          2,
+        ),
+      ],
+    });
+    expect(state.sources).toHaveLength(1);
+    expect(state.sources[0]).toMatchObject({
+      evidence_id: "K1",
+      excerpt: "def x(): pass",
+      query: "kb search",
+    });
+  });
+});
+
 describe("runEventReducer degraded consumption", () => {
   it("sets reportDegraded true and keeps reason from report.ready", () => {
     const state = runEventReducer(initialRunViewState, {
