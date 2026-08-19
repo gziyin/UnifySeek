@@ -14,10 +14,15 @@ import {
 } from "../api/client";
 import type { Artifact, ResearchReport, Run } from "../domain/schemas";
 import { ResearchEventSchema } from "../domain/schemas";
+import {
+  DEFAULT_OUTPUT_MODE,
+  OUTPUT_MODE_MAX_SOURCES,
+  type OutputMode,
+} from "../domain/outputMode";
 import { extractCitedEvidenceIds } from "../domain/reportCites";
 import { Background, readBgChoice } from "../components/Background";
 import { TopBar } from "../components/TopBar";
-import { MODE_MAX_SOURCES, QueryCard, type ResearchMode } from "../components/QueryCard";
+import { QueryCard } from "../components/QueryCard";
 import { TimelineCard } from "../components/TimelineCard";
 import { ReportCard } from "../components/ReportCard";
 import { Ledger } from "../components/Ledger";
@@ -55,7 +60,7 @@ export function ResearchWorkbench() {
   const [reportJson, setReportJson] = useState<ResearchReport | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [view, dispatch] = useReducer(runEventReducer, initialRunViewState);
-  const [mode, setMode] = useState<ResearchMode>("medium");
+  const [mode, setMode] = useState<OutputMode>(DEFAULT_OUTPUT_MODE);
   const [question, setQuestion] = useState("");
   const [bgChoice, setBgChoice] = useState<1 | 2>(() => readBgChoice());
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -284,7 +289,7 @@ export function ResearchWorkbench() {
   );
 
   const handleSubmit = useCallback(
-    async (submittedQuestion: string, submittedMode: ResearchMode) => {
+    async (submittedQuestion: string, submittedMode: OutputMode) => {
       if (!sessionId) {
         throw new Error("session not ready");
       }
@@ -295,7 +300,8 @@ export function ResearchWorkbench() {
       const created = await createRun(sessionId, {
         question: submittedQuestion,
         uploaded_artifact_ids: artifacts.map((item) => item.artifact_id),
-        max_web_sources: MODE_MAX_SOURCES[submittedMode],
+        output_mode: submittedMode,
+        max_web_sources: OUTPUT_MODE_MAX_SOURCES[submittedMode],
       });
       // F1(#41)：提交即乐观激活规划阶段（进行中 + 计时走动），不等首事件回显。
       // 幂等：reducer 仅在 plan 仍 pending 时置位；真实 run.started 不会覆盖。
@@ -320,12 +326,13 @@ export function ResearchWorkbench() {
   }, [run]);
 
   // ---- 历史抽屉恢复：设置会话与 run，由 run?.run_id effect 自动重连 WS / 拉报告 ----
-  // #48：恢复动作视为显式覆盖用户当前输入，回填该 run 的原问题。
+  // #48：恢复动作视为显式覆盖用户当前输入，回填该 run 的原问题；同时回填长度模式。
   const handleRestore = useCallback(
     ({ sessionId: sid, run: restored }: { sessionId: string; run: Run }) => {
       setSessionId(sid);
       setRun(restored);
       setQuestion(restored.question);
+      setMode(restored.output_mode);
       dispatch({ type: "reset" });
       setReportMarkdown("");
       setReportJson(null);

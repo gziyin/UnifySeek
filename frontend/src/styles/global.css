@@ -1443,6 +1443,18 @@ code,
 .drawer-run-meta .status-dot {
   animation: none;
 }
+/* 历史 run 长度模式 badge（短/中/长） */
+.drawer-run-mode {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.55rem;
+  border-radius: 9999px;
+  background: var(--info-bg);
+  color: var(--deep-water);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
 .drawer-run-time {
   flex-shrink: 0;
 }

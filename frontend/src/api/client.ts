@@ -13,6 +13,7 @@ import {
   type Session,
   type SessionListItem,
 } from "../domain/schemas";
+import type { OutputMode } from "../domain/outputMode";
 
 export class ApiError extends Error {
   readonly code: string;
@@ -72,6 +73,7 @@ export async function createRun(
   body: {
     question: string;
     uploaded_artifact_ids: string[];
+    output_mode: OutputMode;
     max_web_sources?: number;
   },
 ): Promise<Run> {

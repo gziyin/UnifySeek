@@ -1,28 +1,26 @@
 import { FormEvent, useState } from "react";
 import type { Artifact } from "../domain/schemas";
+import {
+  OUTPUT_MODE_LABELS,
+  OUTPUT_MODE_MAX_SOURCES,
+  type OutputMode,
+} from "../domain/outputMode";
 import { UploadSection } from "./UploadSection";
 
-export type ResearchMode = "short" | "medium" | "long";
+// 兼容别名：长度模式统一收敛到 domain/outputMode 的 OutputMode。
+export type ResearchMode = OutputMode;
 
-export const MODE_LABELS: Record<ResearchMode, string> = {
-  short: "短",
-  medium: "中",
-  long: "长",
-};
+export const MODE_LABELS: Record<ResearchMode, string> = OUTPUT_MODE_LABELS;
 
-export const MODE_MAX_SOURCES: Record<ResearchMode, number> = {
-  short: 3,
-  medium: 8,
-  long: 15,
-};
+export const MODE_MAX_SOURCES: Record<ResearchMode, number> = OUTPUT_MODE_MAX_SOURCES;
 
 type Props = {
   question: string;
   onQuestionChange: (question: string) => void;
   disabled?: boolean;
-  mode: ResearchMode;
-  onModeChange: (mode: ResearchMode) => void;
-  onSubmit: (question: string, mode: ResearchMode) => Promise<void>;
+  mode: OutputMode;
+  onModeChange: (mode: OutputMode) => void;
+  onSubmit: (question: string, mode: OutputMode) => Promise<void>;
   onCancel?: () => Promise<void>;
   canCancel?: boolean;
   artifacts: Artifact[];
@@ -81,7 +79,7 @@ export function QueryCard({
       <div className="query-actions">
         <div className="query-actions-left">
           <div className="mode-toggle" role="group" aria-label="输出长度模式">
-            {(Object.keys(MODE_LABELS) as ResearchMode[]).map((m) => (
+            {(Object.keys(MODE_LABELS) as OutputMode[]).map((m) => (
               <button
                 key={m}
                 type="button"

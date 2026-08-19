@@ -1,4 +1,11 @@
 import { z } from "zod";
+import { DEFAULT_OUTPUT_MODE, OUTPUT_MODES } from "./outputMode";
+
+// output_mode 契约：缺失（旧后端响应）或非法值一律收敛到 medium（.default/.catch 双兜底）。
+export const OutputModeSchema = z
+  .enum(OUTPUT_MODES)
+  .catch(DEFAULT_OUTPUT_MODE)
+  .default(DEFAULT_OUTPUT_MODE);
 
 export const SessionSchema = z.object({
   session_id: z.string().uuid(),
@@ -32,6 +39,7 @@ export const RunSchema = z.object({
     "cancelled",
   ]),
   question: z.string(),
+  output_mode: OutputModeSchema,
   created_at: z.string(),
   started_at: z.string().nullable().optional(),
   finished_at: z.string().nullable().optional(),

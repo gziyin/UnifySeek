@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { deleteSession, listRunsForSession, listSessions } from "../api/client";
 import type { Run, SessionListItem } from "../domain/schemas";
+import {
+  OUTPUT_MODE_LABELS,
+  normalizeOutputMode,
+} from "../domain/outputMode";
 
 function statusClass(status: string): string {
   switch (status) {
@@ -255,6 +259,9 @@ export function HistoryDrawer({ open, onClose, onRestore, onDeleteSession, onNew
                         >
                           <div className="drawer-run-question">{run.question}</div>
                           <div className="drawer-run-meta">
+                            <span className="drawer-run-mode">
+                              {OUTPUT_MODE_LABELS[normalizeOutputMode(run.output_mode)]}
+                            </span>
                             <span className={`status-pill ${statusClass(run.status)}`}>
                               <span className="status-dot" aria-hidden="true" />
                               {run.status}
