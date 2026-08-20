@@ -6,6 +6,7 @@ from uuid import UUID
 import aiosqlite
 
 from ai_dev_researcher.domain.evidence import EvidenceRecord
+from ai_dev_researcher.repositories.sqlite import run_atomic
 
 
 class EvidenceRepository:
@@ -135,11 +136,8 @@ class EvidenceRepository:
     ) -> list[str]:
         if count <= 0:
             return []
-        # 单个语句完成「播种 + 自增 + 返回」：aiosqlite 单语句在线程上串行执行，
-        # 该语句自带写事务，天然原子（跨多条 execute 的 BEGIN/COMMIT 会被其他协程语句穿插）。
-        # 首次插入时以该前缀已有最大数字后缀为种子，之后每次 +count 原子递增。
-        cursor = await self._conn.execute(
-            """
+
+        sql = """
             INSERT INTO evidence_sequences (run_id, source_type, next_value)
             VALUES (?, ?, (
                 SELECT COALESCE(MAX(CAST(substr(evidence_id, 2) AS INTEGER)), 0)
@@ -148,11 +146,26 @@ class EvidenceRepository:
             ) + ?)
             ON CONFLICT(run_id, source_type) DO UPDATE SET next_value = next_value + ?
             RETURNING next_value
-            """,
-            (str(run_id), prefix, str(run_id), prefix, count, count),
-        )
-        row = await cursor.fetchone()
-        await self._conn.commit()
-        last = int(row["next_value"])
+        """
+        params = (str(run_id), prefix, str(run_id), prefix, count, count)
+
+        def work() -> int:
+            cursor = self._conn._conn.execute(sql, params)
+            try:
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuntimeError("evidence_sequences RETURNING returned no row")
+                last_value = int(row["next_value"])
+                self._conn._conn.commit()
+                return last_value
+            finally:
+                cursor.close()
+
+        try:
+            last = await run_atomic(self._conn, work)
+        except Exception:
+            await self._conn.rollback()
+            raise
+
         start = last - count + 1
         return [f"{prefix}{start + i}" for i in range(count)]

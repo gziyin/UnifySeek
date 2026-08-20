@@ -8,13 +8,18 @@ run b87b0077 实测并发 K 分配对同一 run 产出重复 K ID：allocate_ids
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from ai_dev_researcher.domain.runs import ResearchRequest, Run, RunStatus
 from ai_dev_researcher.repositories.evidence import EvidenceRepository
-from ai_dev_researcher.repositories.sqlite import connect, init_db
+from ai_dev_researcher.repositories.events import EventRepository
+from ai_dev_researcher.repositories.runs import RunRepository
+from ai_dev_researcher.repositories.sessions import SessionRepository
+from ai_dev_researcher.repositories.sqlite import connect, init_db, run_atomic
 
 
 @pytest.fixture
@@ -83,3 +88,94 @@ async def test_concurrent_allocate_ids_never_duplicates(repo):
         ids = {item for item in flat if item.startswith(prefix)}
         assert len(ids) == workers * allocations_per_worker
     assert len(set(flat)) == len(flat)
+
+@pytest.mark.asyncio
+async def test_run_atomic_keeps_returning_finalize_and_commit_in_one_worker(repo):
+    """A RETURNING statement must be finalized before another commit can run."""
+    evidence_repo, run_id = repo
+    events = EventRepository(evidence_repo._conn)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def reserve_work() -> int:
+        cursor = evidence_repo._conn._conn.execute(
+            """
+            INSERT INTO evidence_sequences (run_id, source_type, next_value)
+            VALUES (?, ?, 1)
+            RETURNING next_value
+            """,
+            (str(run_id), "S"),
+        )
+        try:
+            row = cursor.fetchone()
+            entered.set()
+            if not release.wait(timeout=5):
+                raise RuntimeError("test worker was not released")
+            return int(row["next_value"])
+        finally:
+            cursor.close()
+            evidence_repo._conn._conn.commit()
+
+    reserve_task = asyncio.create_task(run_atomic(evidence_repo._conn, reserve_work))
+    await asyncio.to_thread(entered.wait)
+    event_task = asyncio.create_task(
+        events.append(
+            session_id=uuid4(),
+            run_id=run_id,
+            event_type="heartbeat",
+            actor="system",
+            payload={"source": "queued"},
+        )
+    )
+    await asyncio.sleep(0)
+    release.set()
+
+    reserved, event = await asyncio.gather(reserve_task, event_task)
+    assert reserved == 1
+    assert event.seq == 1
+
+
+@pytest.mark.asyncio
+async def test_allocate_ids_interleaves_with_committing_repositories_without_operational_error(
+    repo,
+):
+    """Evidence ID allocation remains safe beside event and run commits."""
+    evidence_repo, _ = repo
+    conn = evidence_repo._conn
+    session = await SessionRepository(conn).create()
+    run = Run(session_id=session.session_id, request=ResearchRequest(question="mixed"))
+    runs = RunRepository(conn)
+    await runs.create(run)
+    events = EventRepository(conn)
+
+    async def allocate():
+        return await evidence_repo.allocate_ids(
+            run.run_id,
+            web_count=1,
+            document_count=1,
+            knowledge_base_count=1,
+        )
+
+    async def append_event():
+        return await events.append(
+            session_id=session.session_id,
+            run_id=run.run_id,
+            event_type="heartbeat",
+            actor="system",
+            payload={"source": "mixed"},
+        )
+
+    async def update_run():
+        return await runs.update_status(run.run_id, RunStatus.RUNNING, started=True)
+
+    results = await asyncio.gather(
+        *(allocate() for _ in range(20)),
+        *(append_event() for _ in range(20)),
+        *(update_run() for _ in range(20)),
+    )
+
+    allocations = results[:20]
+    for prefix_index, prefix in enumerate(("S", "D", "K")):
+        ids = {allocation[prefix_index][0] for allocation in allocations}
+        assert len(ids) == 20
+        assert all(item.startswith(prefix) for item in ids)

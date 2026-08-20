@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from ai_dev_researcher.core.security import ensure_within_root
@@ -58,18 +59,32 @@ def _build_numbering(
 
 _REFINE_SUMMARY_MAX_CHARS = 200
 
+_INLINE_CITATION_RE = re.compile(r"\[(?:[SDK]\d+|\d+)\]", re.IGNORECASE)
+_MULTISPACE_RE = re.compile(r"[ \t]{2,}")
+
+
+def _strip_inline_citations(text: str) -> str:
+    cleaned = _INLINE_CITATION_RE.sub("", text)
+    cleaned = _MULTISPACE_RE.sub(" ", cleaned)
+    cleaned = re.sub(
+        r"\s+([\uFF0C\u3002\uFF01\uFF1F\uFF1B\uFF1A,.!?;:])",
+        r"\1",
+        cleaned,
+    )
+    return cleaned.strip()
+
+
 _SENTENCE_END = "。！？!?"
 _CLAUSE_END = "；;、，,:："
 
 
 def _truncate_summary(text: str, limit: int = _REFINE_SUMMARY_MAX_CHARS) -> str:
-    """核心结论精炼：先剥掉 markdown 强调/代码标记用于度量；
-    未超限则原样返回（保留粗体）；超限则按「句末标点 → 分句/词边界 → 硬切」截断，
-    不追加省略号，避免半词/半句与未闭合 ** 标记（#43）。"""
-    cleaned = text.replace("**", "").replace("`", "").replace("*", "")
-    if len(cleaned) <= limit:
-        return text
-    window = cleaned[:limit]
+    """Clean inline citations, then apply the existing summary truncation rules."""
+    cleaned = _strip_inline_citations(text)
+    markdown_free = cleaned.replace("**", "").replace("`", "").replace("*", "")
+    if len(markdown_free) <= limit:
+        return cleaned
+    window = markdown_free[:limit]
     cut = -1
     for class_ in (_SENTENCE_END, _CLAUSE_END):
         idx = max(window.rfind(ch) for ch in class_)
@@ -80,7 +95,7 @@ def _truncate_summary(text: str, limit: int = _REFINE_SUMMARY_MAX_CHARS) -> str:
         idx = window.rfind(" ")
         cut = idx + 1 if idx != -1 else limit
     out = window[:cut].rstrip()
-    return out if out else cleaned[:limit].rstrip()
+    return out if out else markdown_free[:limit].rstrip()
 
 
 def _render_sources_line(
@@ -99,16 +114,17 @@ def _render_sources_line(
 
 def _render_claim_paragraph(claim: ResearchClaim) -> str:
     """段落式 claim：statement（可含粗体）原样输出，引用由章节末尾聚合标注。"""
-    return claim.statement
+    return _strip_inline_citations(claim.statement)
 
 
 def _render_table(table: ReportTable) -> list[str]:
+    columns = [_strip_inline_citations(column) for column in table.columns]
     out: list[str] = [
-        "| " + " | ".join(table.columns) + " |",
-        "|" + "|".join(["---"] * len(table.columns)) + "|",
+        "| " + " | ".join(columns) + " |",
+        "|" + "|".join(["---"] * len(columns)) + "|",
     ]
     for row in table.rows:
-        out.append("| " + " | ".join(row) + " |")
+        out.append("| " + " | ".join(_strip_inline_citations(cell) for cell in row) + " |")
     return out
 
 
@@ -200,7 +216,7 @@ def render_report_markdown(
             lines.append(f"### {item.topic}")
             lines.append("")
             for side in item.sides:
-                lines.append(f"- {side.position}")
+                lines.append(f"- {_strip_inline_citations(side.position)}")
             lines.append("")
         source_line = _render_sources_line(
             [
@@ -219,7 +235,7 @@ def render_report_markdown(
         lines.append("## 未知项")
         lines.append("")
         for unknown in report.unknowns:
-            lines.append(f"- {unknown}")
+            lines.append(f"- {_strip_inline_citations(unknown)}")
         lines.append("")
 
     if report.recommendations:

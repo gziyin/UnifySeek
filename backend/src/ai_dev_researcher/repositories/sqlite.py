@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TypeVar
+
 import aiosqlite
 
 SCHEMA_SQL = """
@@ -96,6 +99,20 @@ async def connect(db_path: str) -> aiosqlite.Connection:
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+
+T = TypeVar("T")
+
+
+async def run_atomic(conn: aiosqlite.Connection, fn: Callable[[], T]) -> T:
+    """Run a sqlite3 worker function as one non-interleavable aiosqlite unit.
+
+    This intentionally uses aiosqlite's private _execute API. uv.lock currently
+    pins aiosqlite 0.22.1; rerun evidence repository concurrency tests before
+    upgrading aiosqlite.
+    """
+    return await conn._execute(fn)
 
 
 async def init_db(conn: aiosqlite.Connection) -> None:

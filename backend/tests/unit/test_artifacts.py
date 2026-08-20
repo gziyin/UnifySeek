@@ -4,6 +4,8 @@ from uuid import uuid4
 
 from ai_dev_researcher.domain.evidence import EvidenceRecord
 from ai_dev_researcher.domain.reports import (
+    Disagreement,
+    DisagreementSide,
     ReportSection,
     ReportTable,
     ResearchClaim,
@@ -190,3 +192,79 @@ def test_collect_claims_recurses_into_subsections():
     claims = collect_claims(_nested_report())
     assert set(claims.keys()) == {"C1", "C2", "C3", "CR"}
     assert claims["C3"].statement == "statement C3"
+
+
+def test_render_strips_inline_citation_tokens_from_free_text():
+    summary = ResearchClaim(
+        id="summary",
+        statement="Core conclusion [S1] remains prose",
+        citation_ids=["S1"],
+        confidence="medium",
+    )
+    section_claim = ResearchClaim(
+        id="section",
+        statement="Body [S2][D1] continues",
+        citation_ids=["S2"],
+        confidence="medium",
+    )
+    recommendation = ResearchClaim(
+        id="recommendation",
+        statement="Recommendation [K2] closes",
+        citation_ids=["S1"],
+        confidence="medium",
+    )
+    report = ResearchReport(
+        title="t",
+        summary_claims=[summary],
+        sections=[
+            ReportSection(
+                heading="Heading",
+                claims=[section_claim],
+                table=ReportTable(
+                    columns=["Dimension"],
+                    rows=[["Cell [4] remains"]],
+                    citation_ids=["S2"],
+                ),
+            )
+        ],
+        disagreements=[
+            Disagreement(
+                topic="Topic",
+                claim_ids=["section"],
+                sides=[
+                    DisagreementSide(position="Position [s3] remains", citation_ids=["S1"]),
+                    DisagreementSide(position="Other position", citation_ids=["S2"]),
+                ],
+            )
+        ],
+        unknowns=["Unknown item [1] remains"],
+        recommendations=[recommendation],
+    )
+    md = render_report_markdown(report, collect_claims(report))
+    free_text = "\n".join(
+        line
+        for line in md.splitlines()
+        if not line.startswith("*\u6765\u6e90\uff1a") and not line.startswith("- [")
+    )
+
+    for token in ("[S1]", "[S2]", "[D1]", "[K2]", "[s3]", "[1]", "[4]"):
+        assert token not in free_text
+    for fragment in (
+        "Core conclusion remains prose",
+        "Body continues",
+        "Recommendation closes",
+        "Position remains",
+        "Unknown item remains",
+        "Cell remains",
+    ):
+        assert fragment in md
+    assert "  " not in free_text
+
+
+def test_render_generated_sources_survive_inline_strip():
+    report = _nested_report()
+    md = render_report_markdown(report, collect_claims(report), _evidence_map())
+
+    assert "*\u6765\u6e90\uff1a[1][2][3][4]*" in md
+    assert "### Sources" in md
+    assert "- [1] https://example.com/1" in md
