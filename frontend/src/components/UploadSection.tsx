@@ -1,5 +1,18 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type DragEvent } from "react";
 import type { Artifact } from "../domain/schemas";
+
+export function isFileDrag(types: ArrayLike<string>): boolean {
+  return Array.from(types).includes("Files");
+}
+
+export async function uploadFilesSequentially(
+  files: readonly File[],
+  onUpload: (file: File) => Promise<void>,
+): Promise<void> {
+  for (const file of files) {
+    await onUpload(file);
+  }
+}
 
 type Props = {
   artifacts: Artifact[];
@@ -11,35 +24,90 @@ type Props = {
 
 export function UploadSection({ artifacts, disabled, onUpload, onDelete, open }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const dragDepthRef = useRef(0);
   const [pendingName, setPendingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
 
   async function handleFiles(files: FileList | null) {
     if (!files?.length) {
       return;
     }
     setError(null);
-    for (const file of Array.from(files)) {
+    await uploadFilesSequentially(Array.from(files), async (file) => {
       setPendingName(file.name);
       try {
         await onUpload(file);
       } catch (err) {
         setError(err instanceof Error ? err.message : `上传失败: ${file.name}`);
       }
-    }
+    });
     setPendingName(null);
     if (inputRef.current) {
       inputRef.current.value = "";
     }
   }
 
+  function handleDragEnter(event: DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event.dataTransfer.types)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current += 1;
+    if (!disabled) {
+      setDragActive(true);
+    }
+  }
+
+  function handleDragOver(event: DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event.dataTransfer.types)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = disabled ? "none" : "copy";
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event.dataTransfer.types)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setDragActive(false);
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event.dataTransfer.types)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setDragActive(false);
+    if (!disabled) {
+      void handleFiles(event.dataTransfer.files);
+    }
+  }
+
   return (
     <div className={`upload-section ${open ? "open" : ""}`}>
       <div className="upload-section-inner">
-        <div className="upload-dropzone">
+        <div
+          className={`upload-dropzone ${dragActive ? "drag-active" : ""} ${disabled ? "disabled" : ""}`}
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
           <input
             ref={inputRef}
             type="file"
+            multiple
             accept=".pdf,.docx,.md,.txt,text/plain,text/markdown,application/pdf"
             disabled={disabled}
             onChange={(event) => void handleFiles(event.target.files)}

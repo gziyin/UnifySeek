@@ -1,10 +1,12 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   clampElapsed,
   initialRunViewState,
   runEventReducer,
 } from "../src/state/runEventReducer";
-import { computeTotalDisplay } from "../src/components/TimelineCard";
+import { computeTotalDisplay, TimelineCard } from "../src/components/TimelineCard";
 import type { ResearchEvent } from "../src/domain/schemas";
 
 /**
@@ -236,4 +238,30 @@ describe("T6 显示层：总耗时显示值 = 三阶段显示值之和（构造�
     );
     expect(computeTotalDisplay(frozenDisplays)).toBe(state.totalElapsedMs);
   });
+
+  it("先按阶段取整秒再求和，避免毫秒余数跨阶段合并进位", () => {
+    expect(computeTotalDisplay([1_999, 1_999, 0])).toBe(2_000);
+  });
+
+  it.each(["run.succeeded", "run.failed", "run.cancelled", "run.interrupted"])(
+    "%s 显示总耗时，运行中不显示",
+    (terminalType) => {
+      const running = runEventReducer(initialRunViewState, {
+        type: "events",
+        events: [
+          ev("run.started", {}, 1, 0),
+          ev("tool.started", { tool_name: "search_web" }, 2, 10),
+        ],
+      });
+      const runningHtml = renderToStaticMarkup(createElement(TimelineCard, { state: running }));
+      expect(runningHtml).not.toContain("timeline-total");
+
+      const terminal = runEventReducer(running, {
+        type: "events",
+        events: [ev(terminalType, {}, 3, 20)],
+      });
+      const terminalHtml = renderToStaticMarkup(createElement(TimelineCard, { state: terminal }));
+      expect(terminalHtml).toContain("timeline-total");
+    },
+  );
 });

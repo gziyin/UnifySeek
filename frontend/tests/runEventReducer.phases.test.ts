@@ -32,6 +32,28 @@ const T70 = Date.parse("2026-08-03T00:01:10Z");
 const T100 = Date.parse("2026-08-03T00:01:40Z");
 
 describe("runEventReducer phases (issue #27 / #34)", () => {
+  it("poll terminal sync freezes an active phase when the terminal event was missed", () => {
+    const running = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent("run.started", {}, 1, "2026-08-03T00:00:10Z"),
+        makeEvent("tool.started", { tool_name: "search_web" }, 2, "2026-08-03T00:00:40Z"),
+      ],
+    });
+
+    const terminal = runEventReducer(running, {
+      type: "terminalSync",
+      status: "succeeded",
+      at: T100,
+    });
+
+    expect(terminal.runFinished).toBe(true);
+    expect(terminal.terminalStatus).toBe("succeeded");
+    expect(terminal.phases.map((phase) => phase.status)).toEqual(["done", "done", "pending"]);
+    expect(terminal.phases[1].elapsedMs).toBe(T100 - T40);
+    expect(terminal.totalElapsedMs).toBe(T100 - T10);
+  });
+
   it("run.started activates plan phase and starts total timer at its event ts", () => {
     const state = runEventReducer(initialRunViewState, {
       type: "events",
@@ -100,6 +122,22 @@ describe("runEventReducer phases (issue #27 / #34)", () => {
       ],
     });
     expect(state.phases.map((p) => p.status)).toEqual(["done", "done", "active"]);
+  });
+
+  it("get_evidence_ledger completion starts report once without resetting on repeats", () => {
+    const state = runEventReducer(initialRunViewState, {
+      type: "events",
+      events: [
+        makeEvent("run.started", {}, 1, "2026-08-03T00:00:10Z"),
+        makeEvent("tool.started", { tool_name: "search_web" }, 2, "2026-08-03T00:00:40Z"),
+        makeEvent("tool.completed", { tool_name: "get_evidence_ledger" }, 3, "2026-08-03T00:01:10Z"),
+        makeEvent("tool.completed", { tool_name: "get_evidence_ledger" }, 4, "2026-08-03T00:01:20Z"),
+        makeEvent("run.succeeded", {}, 5, "2026-08-03T00:01:40Z"),
+      ],
+    });
+    expect(state.phases[2].startedAt).toBe(T70);
+    expect(state.phases[2].elapsedMs).toBe(T100 - T70);
+    expect(state.phases[1].elapsedMs).toBe(T70 - T40);
   });
 
   it("run.succeeded freezes all phases and total elapsed across batches", () => {

@@ -18,16 +18,28 @@ function formatMs(ms: number): string {
 }
 
 /**
- * #45 显示层构造性修复：总耗时 = 三阶段「已 clamp 的显示值」之和。
- * 输入各阶段显示 elapsed（ms），直接求和回显，使「总耗时 === Σ(阶段显示值)」
- * 由构造恒成立，消除各 key 独立棘轮/时钟平移造成的总耗时分叉。
- * 终态且无棘轮污染时 === reducer 冻结的 totalElapsedMs。
+ * #45 显示层口径：每个阶段的「已 clamp 的显示值」先向下取整到整秒，
+ * 再将三个阶段的整秒值相加。这样总耗时严格等于可见阶段秒数之和，
+ * 不会因各 key 独立棘轮/时钟平移造成显示总计分叉；它不保证等于 reducer
+ * 保留毫秒的原始 totalElapsedMs。
  */
 export function computeTotalDisplay(phaseElapsedMs: readonly number[]): number {
-  return phaseElapsedMs.reduce((acc, ms) => acc + ms, 0);
+  return phaseElapsedMs.reduce(
+    (acc, ms) => acc + Math.floor(Math.max(0, ms) / 1000) * 1000,
+    0,
+  );
 }
 
 function statusFor(state: RunViewState) {
+  if (state.terminalStatus) {
+    const text = {
+      succeeded: "研究完成",
+      failed: "研究失败",
+      cancelled: "已取消",
+      interrupted: "已中断",
+    }[state.terminalStatus];
+    return { text, warn: state.terminalStatus !== "succeeded" };
+  }
   const text =
     state.connection === "connected"
       ? "研究中"
@@ -292,10 +304,10 @@ export function TimelineCard({ state }: Props) {
   // 追踪 run 身份（totalStartedAt，reset/新建/恢复时变化），身份变化即重置钳制状态，
   // 避免跨 run 污染。
   //
-  // 总耗时口径（#45）：总耗时 = 三阶段「已 clamp 的显示值」之和（computeTotalDisplay），
+  // 总耗时口径（#45）：computeTotalDisplay 对三阶段各自的已 clamp 毫秒值先向下取整到整秒，
+  // 再求和并格式化；总计严格等于可见阶段秒数之和，不保证等于 reducer 的原始毫秒 totalElapsedMs。
   // 不再对 total 单独 clamp / 单独按 totalStartedAt 推导——各 key 独立棘轮 + clockOffsetMs
-  // 平移曾使 total 与 Σ(阶段显示值) 脱钩（用户可见「总耗时 > 三阶段之和」）。求和由构造
-  // 恒等，终态无棘轮污染时自然 === reducer 冻结的 totalElapsedMs。
+  // 平移曾使 total 与可见阶段秒数之和脱钩（用户可见「总耗时 > 三阶段之和」）。
   const totalKeyRef = useRef<number | null>(null);
   const clampRef = useRef<Map<string, number>>(new Map());
   if (totalKeyRef.current !== state.totalStartedAt) {
@@ -341,9 +353,11 @@ export function TimelineCard({ state }: Props) {
             ))}
           </div>
 
-          <div className="timeline-total mono" aria-live="polite">
-            总耗时 {formatMs(totalElapsed)}
-          </div>
+          {state.runFinished ? (
+            <div className="timeline-total mono" aria-live="polite">
+              总耗时 {formatMs(totalElapsed)}
+            </div>
+          ) : null}
 
           <button
             type="button"

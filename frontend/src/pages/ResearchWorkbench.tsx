@@ -27,7 +27,12 @@ import { TimelineCard } from "../components/TimelineCard";
 import { ReportCard } from "../components/ReportCard";
 import { Ledger } from "../components/Ledger";
 import { HistoryDrawer } from "../components/HistoryDrawer";
-import { initialRunViewState, runEventReducer } from "../state/runEventReducer";
+import {
+  initialRunViewState,
+  isTerminalRunStatus,
+  runEventReducer,
+  terminalStatusForEvent,
+} from "../state/runEventReducer";
 import { deriveStageVisibility } from "./stageVisibility";
 
 const SESSION_KEY = "ai_dev_researcher.session_id";
@@ -124,8 +129,23 @@ export function ResearchWorkbench() {
     let socket: WebSocket | null = null;
     let retry = 0;
     let timer: number | undefined;
+    let poll: number | undefined;
+    let terminal = isTerminalRunStatus(run.status);
 
     const runId = run.run_id;
+
+    function stopLiveUpdates() {
+      terminal = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+      if (poll !== undefined) {
+        window.clearInterval(poll);
+        poll = undefined;
+      }
+      socket?.close();
+    }
 
     async function hydrate() {
       const events = await listEvents(runId, 0);
@@ -176,12 +196,22 @@ export function ResearchWorkbench() {
             dispatch({ type: "clockSync", serverTimeMs: occurredMs });
           }
           dispatch({ type: "events", events: [data] });
+          const terminalStatus = terminalStatusForEvent(data.type);
+          if (terminalStatus) {
+            setRun((current) =>
+              current?.run_id === runId
+                ? { ...current, status: terminalStatus, finished_at: data.occurred_at }
+                : current,
+            );
+            setCompletedTip(true);
+            stopLiveUpdates();
+          }
         } catch {
           // ignore malformed frames
         }
       };
       socket.onclose = () => {
-        if (disposed) {
+        if (disposed || terminal) {
           return;
         }
         dispatch({ type: "connection", connection: "reconnecting" });
@@ -191,29 +221,47 @@ export function ResearchWorkbench() {
       };
     }
 
-    void hydrate().then(connect);
-    const poll = window.setInterval(() => {
-      void getRun(runId).then((fresh) => {
-        if (disposed) {
-          return;
-        }
-        setRun(fresh);
-        if (
-          fresh.status === "succeeded" ||
-          fresh.status === "failed" ||
-          fresh.status === "interrupted" ||
-          fresh.status === "cancelled"
-        ) {
-          window.clearInterval(poll);
-          // 研究完成引导提示（#35）：显示横幅，引导用户点「＋ 新建对话」开始下一项研究。
-          setCompletedTip(true);
-        }
-      });
-    }, 1500);
+    void hydrate().then(() => {
+      if (disposed) {
+        return;
+      }
+      if (isTerminalRunStatus(run.status)) {
+        const finishedAt = Date.parse(run.finished_at ?? "");
+        dispatch({
+          type: "terminalSync",
+          status: run.status,
+          at: Number.isNaN(finishedAt) ? Date.now() : finishedAt,
+        });
+        setCompletedTip(true);
+        return;
+      }
+      connect();
+      poll = window.setInterval(() => {
+        void getRun(runId).then((fresh) => {
+          if (disposed) {
+            return;
+          }
+          setRun(fresh);
+          if (isTerminalRunStatus(fresh.status)) {
+            const finishedAt = Date.parse(fresh.finished_at ?? "");
+            dispatch({
+              type: "terminalSync",
+              status: fresh.status,
+              at: Number.isNaN(finishedAt) ? Date.now() : finishedAt,
+            });
+            // 研究完成引导提示（#35）：显示横幅，引导用户点「＋ 新建对话」开始下一项研究。
+            setCompletedTip(true);
+            stopLiveUpdates();
+          }
+        });
+      }, 1500);
+    });
 
     return () => {
       disposed = true;
-      window.clearInterval(poll);
+      if (poll !== undefined) {
+        window.clearInterval(poll);
+      }
       if (timer) {
         window.clearTimeout(timer);
       }

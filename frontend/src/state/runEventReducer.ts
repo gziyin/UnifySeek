@@ -4,6 +4,7 @@ export type ConnectionState = "idle" | "connecting" | "connected" | "reconnectin
 
 export type PhaseKey = "plan" | "research" | "report";
 export type PhaseStatus = "pending" | "active" | "done";
+export type TerminalRunStatus = "succeeded" | "failed" | "cancelled" | "interrupted";
 
 export type Phase = {
   key: PhaseKey;
@@ -45,6 +46,8 @@ export type RunViewState = {
   totalElapsedMs: number;
   /** run 是否已达终态（succeeded/failed/cancelled/interrupted）：终态后计时冻结。 */
   runFinished: boolean;
+  /** 终态结果；由终态事件或 REST 轮询兜底同步。 */
+  terminalStatus: TerminalRunStatus | null;
   /**
    * 客户端 ↔ 服务端 wall-clock 偏移（ms）= 客户端接收时刻 − 服务端时间戳
    * （由 clockSync 用心跳 server_time / 实时事件 occurred_at 校准，#42）。
@@ -81,6 +84,7 @@ export const initialRunViewState: RunViewState = {
   totalStartedAt: null,
   totalElapsedMs: 0,
   runFinished: false,
+  terminalStatus: null,
   clockOffsetMs: 0,
 };
 
@@ -89,6 +93,7 @@ export type RunViewAction =
   | { type: "connection"; connection: ConnectionState }
   | { type: "events"; events: ResearchEvent[] }
   | { type: "optimisticStart"; at: number }
+  | { type: "terminalSync"; status: TerminalRunStatus; at: number }
   | { type: "clockSync"; serverTimeMs: number };
 
 // 终态集合：含 run.interrupted（防御性兼容——E1(#40) 的 stale 回收/看门狗会发布
@@ -99,6 +104,25 @@ const TERMINAL_TYPES = new Set([
   "run.cancelled",
   "run.interrupted",
 ]);
+
+export function terminalStatusForEvent(type: string): TerminalRunStatus | null {
+  switch (type) {
+    case "run.succeeded":
+      return "succeeded";
+    case "run.failed":
+      return "failed";
+    case "run.cancelled":
+      return "cancelled";
+    case "run.interrupted":
+      return "interrupted";
+    default:
+      return null;
+  }
+}
+
+export function isTerminalRunStatus(status: string): status is TerminalRunStatus {
+  return status === "succeeded" || status === "failed" || status === "cancelled" || status === "interrupted";
+}
 
 /**
  * clockSync 校准阈值（#42）：仅当新样本偏移与当前 clockOffsetMs 偏差 ≥ 该值时
@@ -177,6 +201,11 @@ function phaseForEvent(event: ResearchEvent): PhaseKey | null {
   const type = event.type;
   if (type === "run.started" || type === "plan.updated") return "plan";
   if (type === "report.ready") return "report";
+  if (
+    type === "tool.completed" &&
+    (event.payload as { tool_name?: string }).tool_name === "get_evidence_ledger"
+  )
+    return "report";
   if (
     type === "tool.completed" &&
     (event.payload as { tool_name?: string }).tool_name === "submit_research_report"
@@ -305,6 +334,22 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
         totalStartedAt: action.at,
       };
     }
+    case "terminalSync": {
+      const advanced = advancePhases(
+        state.phases,
+        state.totalStartedAt,
+        state.totalElapsedMs,
+        state.runFinished,
+        null,
+        true,
+        action.at,
+      );
+      return {
+        ...state,
+        ...advanced,
+        terminalStatus: action.status,
+      };
+    }
     case "events": {
       const merged = [...state.events];
       const seen = new Set(merged.map((item) => item.seq));
@@ -329,7 +374,7 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
       // 阶段推进：以每个事件自身 occurred_at 为时钟起点，只针对「新事件」推进
       // （避免已 seen 重复事件扰动）。不用共享 performance.now()——hydrate 批量灌入时
       // 共用同一 now 会让前一阶段 elapsed 被清零（#34）。
-      let { phases, totalStartedAt, totalElapsedMs, runFinished } = state;
+      let { phases, totalStartedAt, totalElapsedMs, runFinished, terminalStatus } = state;
 
       // 处理本批全部有效事件（合并去重在上方循环完成；阶段推进对重复事件幂等）。
       for (const event of action.events) {
@@ -369,6 +414,7 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
         }
 
         const ts = evTs(event);
+        terminalStatus = terminalStatusForEvent(event.type) ?? terminalStatus;
         const advanced = advancePhases(
           phases,
           totalStartedAt,
@@ -396,6 +442,7 @@ export function runEventReducer(state: RunViewState, action: RunViewAction): Run
         totalStartedAt,
         totalElapsedMs,
         runFinished,
+        terminalStatus,
       };
     }
     default:

@@ -2,6 +2,10 @@ import { useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { artifactDownloadUrl } from "../api/client";
+import {
+  emphasizeCoreSummaryMarkdown,
+  emphasizeSummaryStatement,
+} from "../domain/reportPresentation";
 import type {
   ResearchClaim,
   ResearchReport,
@@ -24,12 +28,26 @@ function ConfidenceBadge({ confidence }: { confidence: string }) {
   );
 }
 
-function ClaimRow({ claim }: { claim: ResearchClaim }) {
+export function ClaimRow({
+  claim,
+  emphasize = false,
+}: {
+  claim: ResearchClaim;
+  emphasize?: boolean;
+}) {
+  const statement = emphasize
+    ? emphasizeSummaryStatement(claim.statement)
+    : claim.statement;
+
   return (
     <div className="rj-claim">
       <ConfidenceBadge confidence={claim.confidence} />
       <div>
-        <div>{claim.statement}</div>
+        <div>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+            {statement}
+          </ReactMarkdown>
+        </div>
         <div className="rj-cites mono">
           [{claim.citation_ids.join(" · ")}]
         </div>
@@ -60,7 +78,7 @@ function StructuredReport({ report }: { report: ResearchReport }) {
       <div className="rj-executive">
         <h3>核心结论</h3>
         {executive.map((claim) => (
-          <ClaimRow claim={claim} key={claim.id} />
+          <ClaimRow claim={claim} emphasize key={claim.id} />
         ))}
       </div>
 
@@ -182,7 +200,7 @@ export function ReportCard({
               <StructuredReport report={reportJson} />
             ) : markdown ? (
               <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents}>
-                {markdown}
+                {emphasizeCoreSummaryMarkdown(markdown)}
               </ReactMarkdown>
             ) : (
               <p style={{ color: "var(--mist)" }}>报告生成后将显示在这里。</p>
