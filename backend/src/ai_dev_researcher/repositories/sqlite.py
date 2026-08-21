@@ -50,6 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
 CREATE TABLE IF NOT EXISTS evidence (
     run_id TEXT NOT NULL,
     evidence_id TEXT NOT NULL,
+    artifact_id TEXT,
     source_type TEXT NOT NULL,
     evidence_level TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -117,4 +118,8 @@ async def run_atomic(conn: aiosqlite.Connection, fn: Callable[[], T]) -> T:
 
 async def init_db(conn: aiosqlite.Connection) -> None:
     await conn.executescript(SCHEMA_SQL)
+    cursor = await conn.execute("PRAGMA table_info(evidence)")
+    columns = await cursor.fetchall()
+    if "artifact_id" not in {row[1] for row in columns}:
+        await conn.execute("ALTER TABLE evidence ADD COLUMN artifact_id TEXT")
     await conn.commit()

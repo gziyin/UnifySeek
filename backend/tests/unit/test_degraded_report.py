@@ -190,9 +190,7 @@ async def test_default_false_still_degrades(env):
 
 
 async def test_executor_budget_exceeded_publishes_clean_degraded_report(executor_env):
-    """预算超限收敛（settings 收紧 profile，探索达上限 max_tool_calls-2）：report.ready
-    payload degraded=true 且 reason 含 budget_exceeded（而非 ReportValidationError），
-    降级 markdown 为干净降级产物。"""
+    """探索预算触顶后 structured finalization 失败：保持干净降级产物并归类 RUN_FAILED。"""
     conn, run, executor = executor_env
     executor._settings.agent_max_tool_calls = 4
     events = [
@@ -210,21 +208,27 @@ async def test_executor_budget_exceeded_publishes_clean_degraded_report(executor
     updated = await RunRepository(conn).get(run.run_id)
     assert updated is not None
     assert updated.status == RunStatus.FAILED
-    assert updated.error_code == "BUDGET_EXCEEDED"
-    assert "exploration_budget" in updated.error_message
+    assert updated.error_code == "RUN_FAILED"
+    assert "exploration_budget" in (updated.error_message or "")
+    assert "structured finalization failed" in (updated.error_message or "")
 
     db_events = await EventRepository(conn).list_after(run.run_id, 0)
     ready = [e for e in db_events if e.type == "report.ready"]
-    assert ready
+    assert len(ready) == 1
     assert ready[0].payload["degraded"] is True
-    assert "budget_exceeded" in (ready[0].payload.get("reason") or "")
-    assert "ReportValidationError" not in (ready[0].payload.get("reason") or "")
+    ready_reason = ready[0].payload.get("reason") or ""
+    assert "exploration_budget" in ready_reason
+    assert "structured finalization failed" in ready_reason
+    assert "ReportValidationError" not in ready_reason
+    assert not any(event.type == "run.succeeded" for event in db_events)
 
     artifact = await ArtifactRepository(conn).get(updated.report_artifact_id)
     assert artifact is not None
+    assert len(await ArtifactRepository(conn).list_for_session(run.session_id)) == 1
     content = Path(artifact.original_storage_path).read_text(encoding="utf-8")
     assert "[DEGRADED]" in content
-    assert "budget_exceeded" in content
+    assert "exploration_budget" in content
+    assert "structured finalization failed" in content
     assert "ReportValidationError" not in content
     assert artifact.normalized_storage_path is None
 

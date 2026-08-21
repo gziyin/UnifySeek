@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from uuid import UUID
 
 import aiosqlite
@@ -81,6 +82,48 @@ class ArtifactRepository:
         )
         rows = await cursor.fetchall()
         return [self._row_to_artifact(row) for row in rows]
+
+    async def rewrite_storage_paths(
+        self, session_id: UUID, old_root: Path, new_root: Path
+    ) -> int:
+        artifacts = await self.list_for_session(session_id)
+        old_root = old_root.resolve()
+        new_root = new_root.resolve()
+        updates: list[tuple[str | None, str | None, str]] = []
+        for artifact in artifacts:
+            original = self._rewrite_path(artifact.original_storage_path, old_root, new_root)
+            normalized = self._rewrite_path(
+                artifact.normalized_storage_path, old_root, new_root
+            )
+            if original != artifact.original_storage_path or normalized != artifact.normalized_storage_path:
+                updates.append((original, normalized, str(artifact.artifact_id)))
+        try:
+            for original, normalized, artifact_id in updates:
+                await self._conn.execute(
+                    """
+                    UPDATE artifacts
+                    SET original_storage_path = ?, normalized_storage_path = ?
+                    WHERE artifact_id = ?
+                    """,
+                    (original, normalized, artifact_id),
+                )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        return len(updates)
+
+    @staticmethod
+    def _rewrite_path(
+        path: str | None, old_root: Path, new_root: Path
+    ) -> str | None:
+        if path is None:
+            return None
+        try:
+            relative = Path(path).resolve().relative_to(old_root)
+        except ValueError:
+            return path
+        return str(new_root / relative)
 
     async def delete(self, artifact_id: UUID) -> bool:
         """Delete the artifact DB record. Returns True if a row was removed."""

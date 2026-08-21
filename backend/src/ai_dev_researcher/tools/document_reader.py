@@ -89,6 +89,7 @@ async def record_document_evidence_impl(
         id=evidence_id,
         run_id=context.run_id,
         source_type="document",
+        artifact_id=artifact.artifact_id,
         evidence_level="user_document",
         title=title or artifact.display_name,
         locator=locator,

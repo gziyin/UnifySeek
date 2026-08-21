@@ -13,6 +13,7 @@ class EvidenceRecord(BaseModel):
     id: str
     run_id: UUID
     source_type: Literal["web", "document", "knowledge_base"]
+    artifact_id: UUID | None = None
     evidence_level: Literal[
         "official_primary",
         "first_party",

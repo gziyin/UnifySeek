@@ -17,14 +17,15 @@ class EvidenceRepository:
         await self._conn.execute(
             """
             INSERT INTO evidence (
-                run_id, evidence_id, source_type, evidence_level, title, locator,
+                run_id, evidence_id, artifact_id, source_type, evidence_level, title, locator,
                 canonical_url, publisher_key, excerpt, page, line_start, line_end,
                 query, result_rank, retrieved_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(record.run_id),
                 record.id,
+                str(record.artifact_id) if record.artifact_id else None,
                 record.source_type,
                 record.evidence_level,
                 record.title,
@@ -47,12 +48,13 @@ class EvidenceRepository:
         await self._conn.execute(
             """
             UPDATE evidence SET
-                source_type = ?, evidence_level = ?, title = ?, locator = ?,
+                artifact_id = ?, source_type = ?, evidence_level = ?, title = ?, locator = ?,
                 canonical_url = ?, publisher_key = ?, excerpt = ?, page = ?,
                 line_start = ?, line_end = ?, query = ?, result_rank = ?, retrieved_at = ?
             WHERE run_id = ? AND evidence_id = ?
             """,
             (
+                str(record.artifact_id) if record.artifact_id else None,
                 record.source_type,
                 record.evidence_level,
                 record.title,
@@ -84,6 +86,7 @@ class EvidenceRepository:
                 id=row["evidence_id"],
                 run_id=UUID(row["run_id"]),
                 source_type=row["source_type"],
+                artifact_id=UUID(row["artifact_id"]) if row["artifact_id"] else None,
                 evidence_level=row["evidence_level"],
                 title=row["title"],
                 locator=row["locator"],

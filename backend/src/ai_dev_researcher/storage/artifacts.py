@@ -174,6 +174,7 @@ def render_report_markdown(
     report: ResearchReport,
     claims_by_id: dict[str, ResearchClaim],
     evidence_by_id: dict[str, EvidenceRecord] | None = None,
+    artifact_display_names: dict[str, str] | None = None,
 ) -> str:
     numbering = _build_numbering(report, claims_by_id)
     lines: list[str] = [f"# {report.title}", ""]
@@ -257,13 +258,35 @@ def render_report_markdown(
         lines.append("")
         for cid, n in numbering.items():
             evidence = evidence_by_id.get(cid)
-            url = (
-                (evidence.canonical_url or evidence.locator)
-                if evidence is not None
-                else ""
-            )
-            if url:
-                lines.append(f"- [{n}] {url}")
+            if evidence is None:
+                continue
+            if evidence.source_type == "document":
+                display_name = (artifact_display_names or {}).get(
+                    str(evidence.artifact_id)
+                )
+                if display_name:
+                    location: list[str] = []
+                    if evidence.page is not None:
+                        location.append(f"\u7b2c {evidence.page} \u9875")
+                    if evidence.line_start is not None and evidence.line_end is not None:
+                        location.append(
+                            f"\u7b2c {evidence.line_start}\u2013{evidence.line_end} \u884c"
+                        )
+                    elif evidence.line_start is not None:
+                        location.append(f"\u7b2c {evidence.line_start} \u884c")
+                    suffix = f"\uff08{'\uff0c'.join(location)}\uff09" if location else ""
+                    source = (
+                        f"{display_name}{suffix}"
+                        if display_name == evidence.title
+                        else f"{display_name} \u2014 {evidence.title}{suffix}"
+                    )
+                else:
+                    source = f"{evidence.title} \u2014 {evidence.locator}"
+            else:
+                source = evidence.canonical_url or evidence.locator
+            if source:
+                lines.append(f"- [{n}] {source}")
+            continue
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

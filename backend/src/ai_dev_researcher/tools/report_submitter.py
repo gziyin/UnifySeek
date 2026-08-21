@@ -204,8 +204,20 @@ async def submit_research_report_impl(
         report = None
 
     if report is not None:
+        artifact_ids = {
+            item.artifact_id
+            for item in evidence_by_id.values()
+            if item.artifact_id is not None
+        }
+        artifact_display_names = {
+            str(item.artifact_id): item.display_name
+            for item in await artifacts.get_many(list(artifact_ids))
+        }
         markdown = render_report_markdown(
-            report, collect_claims(report), evidence_by_id=evidence_by_id
+            report,
+            collect_claims(report),
+            evidence_by_id=evidence_by_id,
+            artifact_display_names=artifact_display_names,
         )
         title = report.title
         degraded = False

@@ -69,6 +69,22 @@ def _evidence_map() -> dict[str, EvidenceRecord]:
     }
 
 
+def _document_evidence(eid: str, artifact_id: str | None = None) -> EvidenceRecord:
+    return EvidenceRecord(
+        id=eid,
+        run_id=uuid4(),
+        source_type="document",
+        evidence_level="user_document",
+        title="采购合同金额条款",
+        locator="lines 20-25",
+        excerpt="合同金额为……",
+        artifact_id=artifact_id,
+        page=3,
+        line_start=20,
+        line_end=25,
+    )
+
+
 def test_render_contains_all_sections():
     md = render_report_markdown(
         _nested_report(), collect_claims(_nested_report()), _evidence_map()
@@ -268,3 +284,88 @@ def test_render_generated_sources_survive_inline_strip():
     assert "*\u6765\u6e90\uff1a[1][2][3][4]*" in md
     assert "### Sources" in md
     assert "- [1] https://example.com/1" in md
+
+
+def test_render_document_source_uses_filename_title_and_location():
+    artifact_id = uuid4()
+    evidence = _document_evidence("D1", str(artifact_id))
+    report = ResearchReport(
+        title="document report",
+        summary_claims=[_claim("C1", ["D1"])],
+        sections=[],
+        recommendations=[_claim("R1", ["D1"])],
+    )
+    md = render_report_markdown(
+        report,
+        collect_claims(report),
+        {"D1": evidence},
+        {str(artifact_id): "采购合同.pdf"},
+    )
+
+    assert "- [1] 采购合同.pdf — 采购合同金额条款（第 3 页，第 20–25 行）" in md
+
+
+def test_render_document_source_falls_back_when_artifact_is_missing():
+    evidence = _document_evidence("D1", str(uuid4()))
+    report = ResearchReport(
+        title="document report",
+        summary_claims=[_claim("C1", ["D1"])],
+        sections=[],
+        recommendations=[_claim("R1", ["D1"])],
+    )
+    md = render_report_markdown(report, collect_claims(report), {"D1": evidence}, {})
+
+    assert "- [1] 采购合同金额条款 — lines 20-25" in md
+
+
+def test_render_web_source_format_is_unchanged_with_document_sources():
+    artifact_id = uuid4()
+    document = _document_evidence("D1", str(artifact_id))
+    web = _evidence("S1", url="https://example.com/source")
+    report = ResearchReport(
+        title="mixed report",
+        summary_claims=[_claim("C1", ["S1", "D1"])],
+        sections=[],
+        recommendations=[_claim("R1", ["S1"])],
+    )
+    md = render_report_markdown(
+        report,
+        collect_claims(report),
+        {"S1": web, "D1": document},
+        {str(artifact_id): "采购合同.pdf"},
+    )
+
+    assert "- [1] https://example.com/source" in md
+    assert "- [2] 采购合同.pdf — 采购合同金额条款（第 3 页，第 20–25 行）" in md
+
+
+def test_render_each_document_evidence_and_omit_repeated_filename_title():
+    artifact_id = uuid4()
+    first = _document_evidence("D1", str(artifact_id)).model_copy(
+        update={"title": "采购合同.pdf"}
+    )
+    second = first.model_copy(
+        update={
+            "id": "D2",
+            "page": 4,
+            "line_start": 30,
+            "line_end": 35,
+            "locator": "lines 30-35",
+        }
+    )
+    report = ResearchReport(
+        title="duplicate report",
+        summary_claims=[_claim("C1", ["D1", "D2"])],
+        sections=[],
+        recommendations=[_claim("R1", ["D1"])],
+    )
+    md = render_report_markdown(
+        report,
+        collect_claims(report),
+        {"D1": first, "D2": second},
+        {str(artifact_id): "采购合同.pdf"},
+    )
+
+    assert "- [1] 采购合同.pdf（第 3 页，第 20–25 行）" in md
+    assert "- [2] 采购合同.pdf（第 4 页，第 30–35 行）" in md
+    assert md.count("采购合同.pdf") == 2

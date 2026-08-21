@@ -52,6 +52,26 @@ class WorkspacePaths:
                 return entry.name
         return None
 
+    def migrate_legacy_session_dir(
+        self, session_id: UUID, display_name: str
+    ) -> tuple[Path, Path] | None:
+        legacy_dir = self.sessions_root / str(session_id)
+        target_dir = self.sessions_root / session_dir_name(display_name, session_id)
+        if not legacy_dir.is_dir() or target_dir.exists():
+            return None
+        try:
+            legacy_dir.rename(target_dir)
+        except FileExistsError:
+            if target_dir.exists():
+                return None
+            raise
+        return legacy_dir, target_dir
+
+    def restore_legacy_session_dir(self, legacy_dir: Path, target_dir: Path) -> None:
+        if legacy_dir.exists():
+            raise FileExistsError(f"legacy session directory exists: {legacy_dir}")
+        target_dir.rename(legacy_dir)
+
     def uploads_dir(self, session_id: UUID, display_name: str | None = None) -> Path:
         return self.session_dir(session_id, display_name) / "uploads"
 

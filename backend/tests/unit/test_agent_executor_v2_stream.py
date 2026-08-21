@@ -7,9 +7,11 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+from langgraph.errors import GraphRecursionError
 
 from ai_dev_researcher.agents.context import RunContext
 from ai_dev_researcher.core.config import Settings
+from ai_dev_researcher.domain.evidence import EvidenceRecord
 from ai_dev_researcher.domain.runs import ResearchRequest, Run, RunStatus
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.repositories.events import EventRepository
@@ -208,6 +210,7 @@ async def test_executor_v2_stream_degraded_path(env):
     types = await _event_types(conn, run.run_id)
     assert "report.ready" in types
     assert "run.failed" in types
+    assert "run.succeeded" not in types
 
 
 @pytest.mark.asyncio
@@ -226,13 +229,13 @@ async def test_executor_v2_stream_no_submit_fails(env):
     updated = await RunRepository(conn).get(run.run_id)
     assert updated is not None
     assert updated.status == RunStatus.FAILED
-    assert "without submit_research_report" in updated.error_message
-    assert "after two controlled retries" in updated.error_message
+    assert "structured finalization failed" in updated.error_message
     assert updated.report_artifact_id is not None
 
     types = await _event_types(conn, run.run_id)
     assert "report.ready" in types
     assert "run.failed" in types
+    assert "run.succeeded" not in types
 
 
 class _HangingStreamAgent:
@@ -300,6 +303,645 @@ class _SequenceStubAgent:
         return _gen()
 
 
+class _LedgerThenDelayedEventAgent:
+    """Completes the evidence ledger, then delays the next event."""
+
+    def __init__(self, delay: float):
+        self._delay = delay
+
+    def astream_events(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        async def _gen():
+            yield _tool_start("search_web", "search-1", {"query": "q"})
+            yield _tool_end("get_evidence_ledger", "ledger-1", {"evidence": []})
+            await asyncio.sleep(self._delay)
+            yield _tool_start("search_web", "search-2", {"query": "q2"})
+
+        return _gen()
+
+
+class _RaiseAfterEventsStubAgent:
+    def astream_events(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        async def _gen():
+            yield _tool_start("submit_research_report", "submit", {"title": "t"})
+            yield _tool_end(
+                "submit_research_report",
+                "submit",
+                {"artifact_id": ARTIFACT_ID, "degraded": False, "title": "t"},
+            )
+            yield _tool_start("write_todos", "todo-1", {"todos": []})
+            yield _tool_end("write_todos", "todo-1", {"items": []})
+            raise GraphRecursionError(
+                "Recursion limit of 25 reached without hitting a stop condition"
+            )
+
+        return _gen()
+
+
+class _RecursionSequenceAgent:
+    """Raises the real LangGraph recursion exception for selected attempts."""
+
+    def __init__(self, batches: list[list[dict]], recurse_attempts: set[int]):
+        self._batches = batches
+        self._recurse_attempts = recurse_attempts
+        self._calls = 0
+
+    def astream_events(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self._calls += 1
+        events = self._batches[min(self._calls, len(self._batches)) - 1]
+        should_recurse = self._calls in self._recurse_attempts
+
+        async def _gen():
+            for ev in events:
+                yield ev
+            if should_recurse:
+                raise GraphRecursionError(
+                    "Recursion limit of 25 reached without hitting a stop condition"
+                )
+
+        return _gen()
+
+
+class _VirtualClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def monotonic(self):
+        return self.value
+
+    def advance(self, seconds: float):
+        self.value += seconds
+
+
+class _VirtualSequenceAgent:
+    def __init__(self, batches: list[list[dict]], advances: list[float], clock: _VirtualClock):
+        self._batches = batches
+        self._advances = advances
+        self._clock = clock
+        self._calls = 0
+
+    def astream_events(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self._calls += 1
+        batch = self._batches[self._calls - 1]
+        advance = self._advances[self._calls - 1]
+
+        async def _gen():
+            for event in batch:
+                yield event
+            self._clock.advance(advance)
+
+        return _gen()
+
+
+class _VirtualRecursionAtDeadlineAgent:
+    def __init__(self, clock: _VirtualClock, advance: float):
+        self._clock = clock
+        self._advance = advance
+        self._calls = 0
+
+    def astream_events(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self._calls += 1
+
+        async def _gen():
+            yield _model_end("recursing at soft deadline")
+            self._clock.advance(self._advance)
+            raise GraphRecursionError(
+                "Recursion limit of 25 reached without hitting a stop condition"
+            )
+
+        return _gen()
+
+
+class _VirtualStructuredRunnable:
+    def __init__(self, report: dict, clock: _VirtualClock, advance: float):
+        self._report = report
+        self._clock = clock
+        self._advance = advance
+
+    async def ainvoke(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self._clock.advance(self._advance)
+        return self._report
+
+
+class _VirtualStructuredModel:
+    def __init__(self, report: dict, clock: _VirtualClock, advance: float = 0.0):
+        self._report = report
+        self._clock = clock
+        self._advance = advance
+        self.calls = 0
+
+    def model_copy(self, *, update=None, deep=False):  # noqa: ANN001, ANN002
+        return self
+
+    def with_structured_output(self, schema, *, method="function_calling", **kwargs):  # noqa: ANN001, ANN003
+        self.calls += 1
+        return _VirtualStructuredRunnable(self._report, self._clock, self._advance)
+
+
+class _StructuredRunnable:
+    def __init__(self, report: dict, delay: float = 0.0):
+        self.report = report
+        self.delay = delay
+
+    async def ainvoke(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        return self.report
+
+
+class _StructuredModel:
+    def __init__(
+        self,
+        report: dict,
+        delay: float = 0.0,
+        *,
+        extra_body: dict | None = None,
+        reject_thinking_tool_choice: bool = False,
+        calls: list[dict] | None = None,
+    ):
+        self.report = report
+        self.delay = delay
+        self.extra_body = extra_body or {"thinking": {"type": "enabled"}}
+        self.reject_thinking_tool_choice = reject_thinking_tool_choice
+        self.calls = calls if calls is not None else []
+
+    def model_copy(self, *, update=None, deep=False):  # noqa: ANN001, ANN002
+        values = dict(update or {})
+        return _StructuredModel(
+            self.report,
+            self.delay,
+            extra_body=values.get("extra_body", self.extra_body),
+            reject_thinking_tool_choice=self.reject_thinking_tool_choice,
+            calls=self.calls,
+        )
+
+    def with_structured_output(self, schema, *, method="function_calling", **kwargs):  # noqa: ANN001, ANN003
+        if (
+            self.reject_thinking_tool_choice
+            and method == "function_calling"
+            and self.extra_body.get("thinking", {}).get("type") != "disabled"
+        ):
+            raise RuntimeError("HTTP 400: Thinking mode does not support this tool_choice")
+        self.calls.append(
+            {
+                "schema": schema,
+                "method": method,
+                "kwargs": kwargs,
+                "extra_body": dict(self.extra_body),
+            }
+        )
+        return _StructuredRunnable(self.report, self.delay)
+
+
+class _ModelBinding:
+    def __init__(self, model):
+        self.instance = model
+
+
+class _FailingStructuredRunnable:
+    async def ainvoke(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("structured provider unavailable")
+
+
+class _FailingStructuredModel:
+    def with_structured_output(self, schema, *, method="function_calling", **kwargs):  # noqa: ANN001, ANN003
+        return _FailingStructuredRunnable()
+
+
+@pytest.mark.asyncio
+async def test_executor_returns_after_submit_completed_before_graph_recursion(env):
+    settings, conn, session, run, publisher, executor = env
+    stub = _RaiseAfterEventsStubAgent()
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(_FailingStructuredModel()),
+        ),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    types = await _event_types(conn, run.run_id)
+    assert types.count("tool.completed") == 1
+    assert types.count("report.ready") == 1
+    assert types.count("run.succeeded") == 1
+    assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+async def test_executor_first_recursion_enters_structured_finalization(env):
+    settings, conn, session, run, publisher, executor = env
+    stub = _RecursionSequenceAgent([[_tool_start("search_web", "search-1", {"query": "q"})]], recurse_attempts={1})
+    model = _StructuredModel({"title": "structured final", "sections": [], "recommendations": [], "disagreements": [], "unknowns": []})
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch("ai_dev_researcher.services.agent_executor.create_model_binding", return_value=_ModelBinding(model)),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    assert stub._calls == 1
+    types = await _event_types(conn, run.run_id)
+    assert types.count("report.ready") == 1
+    assert types.count("run.succeeded") == 1
+    assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+async def test_executor_two_recursions_use_structured_finalization_success(env):
+    settings, conn, session, run, publisher, executor = env
+    stub = _RecursionSequenceAgent([[], []], recurse_attempts={1, 2})
+    model = _StructuredModel(
+        {
+            "title": "structured final",
+            "sections": [],
+            "recommendations": [],
+            "disagreements": [],
+            "unknowns": [],
+        }
+    )
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    assert stub._calls == 1
+    types = await _event_types(conn, run.run_id)
+    assert types.count("report.ready") == 1
+    assert types.count("run.succeeded") == 1
+    assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+async def test_executor_first_recursion_structured_failure_keeps_single_degraded_artifact(env):
+    settings, conn, session, run, publisher, executor = env
+    stub = _RecursionSequenceAgent([[]], recurse_attempts={1})
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(_FailingStructuredModel()),
+        ),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "RUN_FAILED"
+    assert "GraphRecursionError" in (updated.error_message or "")
+    assert "structured finalization failed" in (updated.error_message or "")
+    artifacts = await ArtifactRepository(conn).list_for_session(session.session_id)
+    assert len(artifacts) == 1
+    assert updated.report_artifact_id == artifacts[0].artifact_id
+    degraded_text = Path(artifacts[0].original_storage_path).read_text(encoding="utf-8")
+    assert "GraphRecursionError" in degraded_text
+    assert "structured finalization failed" in degraded_text
+    types = await _event_types(conn, run.run_id)
+    assert types.count("report.ready") == 1
+    assert types.count("run.failed") == 1
+
+
+@pytest.mark.asyncio
+async def test_executor_recursion_at_soft_deadline_preserves_context_on_structured_failure(env):
+    settings, conn, session, run, publisher, executor = env
+    executor._settings.agent_max_elapsed_seconds = 120.0
+    clock = _VirtualClock()
+    stub = _VirtualRecursionAtDeadlineAgent(clock, advance=80.0)
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.time.monotonic", side_effect=clock.monotonic),
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(_FailingStructuredModel()),
+        ),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "RUN_FAILED"
+    assert "GraphRecursionError" in (updated.error_message or "")
+    assert "structured finalization failed" in (updated.error_message or "")
+    artifacts = await ArtifactRepository(conn).list_for_session(session.session_id)
+    assert len(artifacts) == 1
+    degraded_text = Path(artifacts[0].original_storage_path).read_text(encoding="utf-8")
+    assert "GraphRecursionError" in degraded_text
+    assert "structured finalization failed" in degraded_text
+    types = await _event_types(conn, run.run_id)
+    assert types.count("report.ready") == 1
+    assert types.count("run.failed") == 1
+    assert "run.succeeded" not in types
+    assert stub._calls == 1
+
+
+@pytest.mark.asyncio
+async def test_executor_second_normal_attempt_hits_soft_deadline_and_finalizes(env):
+    settings, conn, session, run, publisher, executor = env
+    clock = _VirtualClock()
+    stub = _VirtualSequenceAgent([[_model_end("first")], [_model_end("second")]], [30.0, 50.0], clock)
+    model = _VirtualStructuredModel(
+        {"title": "soft deadline final", "executive_summary_claim_ids": [], "sections": [], "recommendations": [], "disagreements": [], "unknowns": []},
+        clock,
+    )
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.time.monotonic", side_effect=clock.monotonic),
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch("ai_dev_researcher.services.agent_executor.create_model_binding", return_value=_ModelBinding(model)),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    assert stub._calls == 2
+    assert model.calls == 1
+    assert clock.value == 80.0
+    types = await _event_types(conn, run.run_id)
+    assert types.count("report.ready") == 1
+    assert types.count("run.succeeded") == 1
+    assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+async def test_executor_structured_budget_exhaustion_writes_single_degraded_report(env):
+    settings, conn, session, run, publisher, executor = env
+    executor._settings.agent_max_elapsed_seconds = 90.0
+    executor._settings.agent_report_timeout_seconds = 0.0
+    clock = _VirtualClock()
+    stub = _VirtualSequenceAgent([[_model_end("first")]], [60.0], clock)
+    model = _VirtualStructuredModel(
+        {"title": "late final", "executive_summary_claim_ids": [], "sections": [], "recommendations": [], "disagreements": [], "unknowns": []},
+        clock,
+        advance=31.0,
+    )
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.time.monotonic", side_effect=clock.monotonic),
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch("ai_dev_researcher.services.agent_executor.create_model_binding", return_value=_ModelBinding(model)),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "BUDGET_EXCEEDED"
+    artifacts = await ArtifactRepository(conn).list_for_session(session.session_id)
+    assert len(artifacts) == 1
+    assert updated.report_artifact_id == artifacts[0].artifact_id
+    types = await _event_types(conn, run.run_id)
+    assert types.count("report.ready") == 1
+    assert types.count("run.failed") == 1
+    assert "run.succeeded" not in types
+
+
+@pytest.mark.asyncio
+async def test_executor_long_missing_submit_uses_structured_finalization_and_succeeds(env):
+    settings, conn, session, run, publisher, executor = env
+    run.request.output_mode = "long"
+    store = EvidenceStore(
+        run_id=run.run_id,
+        session_id=session.session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=executor._paths,
+    )
+    evidence_id = await store.allocate_web_id()
+    await store.add(
+        EvidenceRecord(
+            id=evidence_id,
+            run_id=run.run_id,
+            source_type="web",
+            evidence_level="first_party",
+            title="source",
+            locator="https://example.com/source",
+            canonical_url="https://example.com/source",
+            excerpt="source excerpt",
+        )
+    )
+    report = {
+        "title": "Long final report",
+        "executive_summary_claim_ids": ["C1"],
+        "sections": [
+            {
+                "heading": "Findings",
+                "claims": [
+                    {
+                        "id": "C1",
+                        "statement": "validated finding",
+                        "citation_ids": [evidence_id],
+                        "confidence": "medium",
+                    }
+                ],
+            }
+        ],
+        "recommendations": [
+            {
+                "id": "R1",
+                "statement": "validated recommendation",
+                "citation_ids": [evidence_id],
+                "confidence": "medium",
+            }
+        ],
+        "disagreements": [],
+        "unknowns": [],
+    }
+    model = _StructuredModel(report)
+    stub = _SequenceStubAgent([[_model_end("first")], [_model_end("second")]])
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    assert updated.report_artifact_id is not None
+    assert stub._calls == 2
+    assert len(model.calls) == 1
+    assert model.calls[0]["method"] == "function_calling"
+    types = await _event_types(conn, run.run_id)
+    assert types.count("report.ready") == 1
+    assert types.count("run.succeeded") == 1
+    assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+async def test_structured_submit_degraded_reuses_single_artifact(env):
+    settings, conn, session, run, publisher, executor = env
+    report = {
+        "title": "Invalid final report",
+        "executive_summary_claim_ids": ["C1"],
+        "sections": [{
+            "heading": "Findings",
+            "claims": [{
+                "id": "C1",
+                "statement": "unknown citation",
+                "citation_ids": ["S99"],
+                "confidence": "medium",
+            }],
+        }],
+        "recommendations": [],
+        "disagreements": [],
+        "unknowns": [],
+    }
+    model = _StructuredModel(report)
+    stub = _SequenceStubAgent([[_model_end("first")], [_model_end("second")]])
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    artifacts = await ArtifactRepository(conn).list_for_session(session.session_id)
+    assert len(artifacts) == 1
+    assert updated.report_artifact_id == artifacts[0].artifact_id
+    types = await _event_types(conn, run.run_id)
+    assert types.count("report.ready") == 1
+    assert types.count("run.failed") == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_finalization_uses_effective_report_timeout(env):
+    settings, conn, session, run, publisher, executor = env
+    run.request.output_mode = "long"
+    executor._settings.agent_report_timeout_seconds = 0.2
+    executor._settings.agent_max_elapsed_seconds = 0.01
+    store = EvidenceStore(
+        run_id=run.run_id,
+        session_id=session.session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=executor._paths,
+    )
+    evidence_id = await store.allocate_web_id()
+    await store.add(EvidenceRecord(
+        id=evidence_id,
+        run_id=run.run_id,
+        source_type="web",
+        evidence_level="first_party",
+        title="source",
+        locator="https://example.com/source",
+        canonical_url="https://example.com/source",
+        excerpt="source excerpt",
+    ))
+    report = {
+        "title": "Slow final report",
+        "executive_summary_claim_ids": ["C1"],
+        "sections": [{"heading": "Findings", "claims": [{
+            "id": "C1", "statement": "validated finding",
+            "citation_ids": [evidence_id], "confidence": "medium"
+        }]}],
+        "recommendations": [],
+        "disagreements": [],
+        "unknowns": [],
+    }
+    model = _StructuredModel(report, delay=0.05)
+    stub = _SequenceStubAgent([[_model_end("first")], [_model_end("second")]])
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "BUDGET_EXCEEDED"
+    assert "max_elapsed_seconds" in (updated.error_message or "")
+    assert updated.report_artifact_id is not None
+
+
+@pytest.mark.asyncio
+async def test_structured_finalization_uses_remaining_run_budget(env):
+    settings, conn, session, run, publisher, executor = env
+    run.request.output_mode = "long"
+    executor._settings.agent_report_timeout_seconds = 0.5
+    executor._settings.agent_max_elapsed_seconds = 0.15
+    store = EvidenceStore(
+        run_id=run.run_id,
+        session_id=session.session_id,
+        evidence_repo=EvidenceRepository(conn),
+        paths=executor._paths,
+    )
+    evidence_id = await store.allocate_web_id()
+    await store.add(EvidenceRecord(
+        id=evidence_id,
+        run_id=run.run_id,
+        source_type="web",
+        evidence_level="first_party",
+        title="source",
+        locator="https://example.com/source",
+        canonical_url="https://example.com/source",
+        excerpt="source excerpt",
+    ))
+    report = {
+        "title": "Slow final report",
+        "executive_summary_claim_ids": ["C1"],
+        "sections": [{"heading": "Findings", "claims": [{
+            "id": "C1", "statement": "validated finding",
+            "citation_ids": [evidence_id], "confidence": "medium"
+        }]}],
+        "recommendations": [],
+        "disagreements": [],
+        "unknowns": [],
+    }
+    model = _StructuredModel(report, delay=0.1)
+    stub = _SlowStreamAgent(
+        [[_model_end("first")], [_model_end("second")]],
+        gap=0.05,
+    )
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "BUDGET_EXCEEDED"
+    assert "max_elapsed_seconds" in (updated.error_message or "")
+    assert updated.report_artifact_id is not None
+
+
 class _InterruptMidStreamStubAgent:
     def __init__(self, runs, run_id):
         self._runs = runs
@@ -331,8 +973,7 @@ class _FakeKnowledgeIndex:
 
 @pytest.mark.asyncio
 async def test_executor_budget_max_tool_calls_writes_degraded_report(env, tmp_path):
-    """Settings 正数作为全局收紧上限时，探索达上限（max_tool_calls-2）：停止漫游、
-    写 DEGRADED 报告、run FAILED with BUDGET_EXCEEDED。"""
+    """Settings 正数收紧探索上限时，探索停止并进入 structured finalization。"""
     settings, conn, session, run, publisher, executor = env
     # medium profile 40 被 settings 4 收紧（min(40, 4)=4）→ 探索预算 = 4-2 = 2。
     executor._settings.agent_max_tool_calls = 4
@@ -344,25 +985,40 @@ async def test_executor_budget_max_tool_calls_writes_degraded_report(env, tmp_pa
         _tool_start("search_web", "r3", {"query": "never reached"}),
     ]
     stub = _StubAgent(events)
+    model = _StructuredModel(
+        {
+            "title": "structured final",
+            "sections": [],
+            "recommendations": [],
+            "disagreements": [],
+            "unknowns": [],
+        }
+    )
 
-    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
         await executor(run.run_id)
 
     updated = await RunRepository(conn).get(run.run_id)
     assert updated is not None
-    assert updated.status == RunStatus.FAILED
-    assert updated.error_code == "BUDGET_EXCEEDED"
-    assert "exploration_budget" in updated.error_message
+    assert updated.status == RunStatus.SUCCEEDED
+    assert updated.error_code is None
     assert updated.report_artifact_id is not None
 
     types = await _event_types(conn, run.run_id)
     assert "report.ready" in types
-    assert "run.failed" in types
+    assert "run.succeeded" in types
+    assert "run.failed" not in types
 
 
 @pytest.mark.asyncio
 async def test_executor_budget_constraints_override_settings(env, tmp_path):
-    """run constraints 可传 max_tool_calls，护栏在请求级生效（探索预算 = max-2）。"""
+    """run constraints 的探索预算触顶后进入 structured finalization。"""
     settings, conn, session, run, publisher, executor = env
     run2 = Run(
         session_id=session.session_id,
@@ -378,15 +1034,30 @@ async def test_executor_budget_constraints_override_settings(env, tmp_path):
         _tool_start("search_web", "r2", {"query": "never reached"}),
     ]
     stub = _StubAgent(events)
+    model = _StructuredModel(
+        {
+            "title": "structured final",
+            "sections": [],
+            "recommendations": [],
+            "disagreements": [],
+            "unknowns": [],
+        }
+    )
 
-    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
         await executor(run2.run_id)
 
     updated = await RunRepository(conn).get(run2.run_id)
     assert updated is not None
-    assert updated.status == RunStatus.FAILED
-    assert updated.error_code == "BUDGET_EXCEEDED"
-    assert "exploration_budget" in updated.error_message
+    assert updated.status == RunStatus.SUCCEEDED
+    assert updated.error_code is None
+    assert updated.report_artifact_id is not None
 
 
 @pytest.mark.asyncio
@@ -484,8 +1155,8 @@ async def test_executor_missing_submit_retries_once_then_succeeds(env, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_executor_missing_submit_thrice_writes_degraded_report_with_last_message(env):
-    """三次 attempt 均未提交：run FAILED + 降级报告，失败原因与报告含最后模型消息。"""
+async def test_executor_two_graph_attempts_then_structured_finalization_failure_writes_degraded_report(env):
+    """两轮普通 graph attempt 后 structured finalization 失败：写入降级报告。"""
     settings, conn, session, run, publisher, executor = env
     batches = [
         [_model_end("第一轮：我先继续搜索证据。")],
@@ -494,14 +1165,19 @@ async def test_executor_missing_submit_thrice_writes_degraded_report_with_last_m
     ]
     stub = _SequenceStubAgent(batches)
 
-    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(_FailingStructuredModel()),
+        ),
+    ):
         await executor(run.run_id)
 
     updated = await RunRepository(conn).get(run.run_id)
     assert updated is not None
     assert updated.status == RunStatus.FAILED
-    assert "after two controlled retries" in updated.error_message
-    assert "last assistant message" in updated.error_message
+    assert "structured finalization failed" in updated.error_message
     assert updated.report_artifact_id is not None
 
     types = await _event_types(conn, run.run_id)
@@ -510,38 +1186,60 @@ async def test_executor_missing_submit_thrice_writes_degraded_report_with_last_m
 
     artifact = await ArtifactRepository(conn).get(updated.report_artifact_id)
     assert artifact is not None
-    content = Path(artifact.original_storage_path).read_text(encoding="utf-8")
-    assert "第三轮：最终回答文本（未调用提交工具）。" in content
+    assert artifact.original_storage_path
 
 
 @pytest.mark.asyncio
-async def test_executor_missing_submit_thrice_then_succeeds_on_third(env):
-    """第三次 attempt 成功提交：run SUCCEEDED 且使用 :retry2 thread。"""
+async def test_executor_two_graph_attempts_then_structured_finalization_succeeds(env):
+    """两轮普通 graph attempt 后 structured finalization 成功：run SUCCEEDED。"""
     settings, conn, session, run, publisher, executor = env
     batches = [
         [_model_end("第一轮文本")],
         [_model_end("第二轮文本")],
-        [
-            _tool_start("submit_research_report", "r3", {"title": "final"}),
-            _tool_end("submit_research_report", "r3", {"artifact_id": ARTIFACT_ID, "title": "final"}),
-        ],
     ]
     stub = _SequenceStubAgent(batches)
+    model = _StructuredModel(
+        {
+            "title": "final",
+            "sections": [],
+            "recommendations": [],
+            "disagreements": [],
+            "unknowns": [],
+        },
+        extra_body={"trace_id": "keep", "thinking": {"type": "enabled"}},
+        reject_thinking_tool_choice=True,
+    )
 
-    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
         await executor(run.run_id)
 
     updated = await RunRepository(conn).get(run.run_id)
     assert updated is not None
     assert updated.status == RunStatus.SUCCEEDED
-    assert str(updated.report_artifact_id) == ARTIFACT_ID
-    assert stub._calls == 3
-    assert ":retry2" in str(stub._configs[2].get("configurable", {}).get("thread_id"))
+    assert updated.report_artifact_id is not None
+    assert stub._calls == 2
+    assert len(model.calls) == 1
+    assert model.calls[0]["schema"].__name__ == "ResearchReport"
+    assert model.calls[0]["method"] == "function_calling"
+    assert model.calls[0]["extra_body"] == {
+        "trace_id": "keep",
+        "thinking": {"type": "disabled"},
+    }
+    assert model.extra_body == {
+        "trace_id": "keep",
+        "thinking": {"type": "enabled"},
+    }
 
 
 @pytest.mark.asyncio
 async def test_executor_budget_on_second_attempt_stops_before_third(env):
-    """第二次 attempt 预算超限：立即 BUDGET_EXCEEDED，不再发起第三次 attempt。"""
+    """第二次 attempt 探索预算触顶：停止后续 graph，进入 structured finalization。"""
     settings, conn, session, run, publisher, executor = env
     executor._settings.agent_max_tool_calls = 1
     batches = [
@@ -549,14 +1247,29 @@ async def test_executor_budget_on_second_attempt_stops_before_third(env):
         [_tool_start("search_web", "r2", {"query": "budget"})],
     ]
     stub = _SequenceStubAgent(batches)
+    model = _StructuredModel(
+        {
+            "title": "structured final",
+            "sections": [],
+            "recommendations": [],
+            "disagreements": [],
+            "unknowns": [],
+        }
+    )
 
-    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
         await executor(run.run_id)
 
     updated = await RunRepository(conn).get(run.run_id)
     assert updated is not None
-    assert updated.status == RunStatus.FAILED
-    assert updated.error_code == "BUDGET_EXCEEDED"
+    assert updated.status == RunStatus.SUCCEEDED
+    assert updated.error_code is None
     assert updated.report_artifact_id is not None
     assert stub._calls == 2
 
@@ -594,7 +1307,7 @@ async def test_executor_exploration_budget_reserves_ledger_and_submit(env):
 
 @pytest.mark.asyncio
 async def test_executor_exploration_budget_blocks_further_exploration(env):
-    """Batch C：探索达上限后再发起搜索 → 立即 BUDGET_EXCEEDED，不继续、不 retry。"""
+    """探索软预算触顶后停止当前 graph，进入 structured finalization。"""
     settings, conn, session, run, publisher, executor = env
     run2 = Run(
         session_id=session.session_id,
@@ -609,18 +1322,99 @@ async def test_executor_exploration_budget_blocks_further_exploration(env):
         _tool_start("search_web", "sX", {"query": "over budget"}),
     ]
     stub = _SequenceStubAgent([events])
+    model = _StructuredModel(
+        {
+            "title": "structured final",
+            "sections": [],
+            "recommendations": [],
+            "disagreements": [],
+            "unknowns": [],
+        }
+    )
 
-    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(model),
+        ),
+    ):
+        await executor(run2.run_id)
+
+    updated = await RunRepository(conn).get(run2.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.SUCCEEDED
+    assert updated.error_code is None
+    assert updated.report_artifact_id is not None
+    assert stub._calls == 1
+
+    artifacts = await ArtifactRepository(conn).list_for_session(session.session_id)
+    assert len(artifacts) == 1
+
+    db_events = await EventRepository(conn).list_after(run2.run_id, 0)
+    assert sum(event.type == "report.ready" for event in db_events) == 1
+    assert sum(event.type == "run.succeeded" for event in db_events) == 1
+    assert sum(event.type == "run.failed" for event in db_events) == 0
+    assert not any(
+        event.type == "tool.completed"
+        and event.payload.get("tool_name") == "search_web"
+        and event.payload.get("tool_call_id") == "sX"
+        for event in db_events
+    )
+    assert not any(
+        event.type == "report.ready" and event.payload.get("degraded")
+        for event in db_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_exploration_budget_structured_failure_is_run_failed(env):
+    """探索预算软拦截后的 structured 失败必须合并原因并归类 RUN_FAILED。"""
+    settings, conn, session, run, publisher, executor = env
+    run2 = Run(
+        session_id=session.session_id,
+        request=ResearchRequest(
+            question="测试问题：探索预算触顶后 structured 失败",
+            constraints=["max_tool_calls=6"],
+        ),
+    )
+    await RunRepository(conn).create(run2)
+    events = [
+        *_explore_events(4),
+        _tool_start("extract_web_sources", "sX", {"query": "over budget"}),
+    ]
+    stub = _SequenceStubAgent([events])
+
+    with (
+        patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub),
+        patch(
+            "ai_dev_researcher.services.agent_executor.create_model_binding",
+            return_value=_ModelBinding(_FailingStructuredModel()),
+        ),
+    ):
         await executor(run2.run_id)
 
     updated = await RunRepository(conn).get(run2.run_id)
     assert updated is not None
     assert updated.status == RunStatus.FAILED
-    assert updated.error_code == "BUDGET_EXCEEDED"
-    assert "exploration_budget" in updated.error_message
+    assert updated.error_code == "RUN_FAILED"
+    assert "exploration_budget" in (updated.error_message or "")
+    assert "structured finalization failed" in (updated.error_message or "")
     assert updated.report_artifact_id is not None
-    # 不发起 retry：第一次 attempt 即在探索超限处终止。
     assert stub._calls == 1
+
+    artifacts = await ArtifactRepository(conn).list_for_session(session.session_id)
+    assert len(artifacts) == 1
+    db_events = await EventRepository(conn).list_after(run2.run_id, 0)
+    assert sum(event.type == "report.ready" for event in db_events) == 1
+    assert sum(event.type == "run.failed" for event in db_events) == 1
+    assert sum(event.type == "run.succeeded" for event in db_events) == 0
+    assert not any(
+        event.type == "tool.completed"
+        and event.payload.get("tool_name") == "extract_web_sources"
+        and event.payload.get("tool_call_id") == "sX"
+        for event in db_events
+    )
 
 
 @pytest.mark.asyncio
@@ -1007,6 +1801,28 @@ async def test_executor_stage_budget_research_timeout_writes_degraded(env):
     assert updated.status == RunStatus.FAILED
     assert updated.error_code == "BUDGET_EXCEEDED"
     assert "stage_timeout:research" in updated.error_message
+    assert updated.report_artifact_id is not None
+
+
+@pytest.mark.asyncio
+async def test_executor_stage_budget_report_starts_after_ledger_completion(env):
+    """ledger 完成后进入 report，看门狗应覆盖后续模型组织静默期。"""
+    settings, conn, session, run, publisher, executor = env
+    executor._settings.agent_max_elapsed_seconds = 0
+    executor._settings.agent_plan_timeout_seconds = 0
+    executor._settings.agent_research_timeout_seconds = 1.0
+    executor._settings.agent_report_timeout_seconds = 0.05
+    executor._settings.agent_idle_timeout_seconds = 0
+    stub = _LedgerThenDelayedEventAgent(delay=0.08)
+
+    with patch("ai_dev_researcher.services.agent_executor.create_research_agent", return_value=stub):
+        await executor(run.run_id)
+
+    updated = await RunRepository(conn).get(run.run_id)
+    assert updated is not None
+    assert updated.status == RunStatus.FAILED
+    assert updated.error_code == "BUDGET_EXCEEDED"
+    assert "stage_timeout:report" in (updated.error_message or "")
     assert updated.report_artifact_id is not None
 
 

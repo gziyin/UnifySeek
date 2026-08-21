@@ -9,6 +9,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from ai_dev_researcher.core.config import Settings
+from ai_dev_researcher.domain.artifacts import Artifact, ArtifactKind
 from ai_dev_researcher.domain.runs import ResearchRequest, Run, RunStatus
 from ai_dev_researcher.domain.sessions import (
     Session,
@@ -424,3 +425,157 @@ async def test_first_run_naming_failure_falls_back_to_legacy(tmp_path: Path, mon
     legacy_dir = tmp_path / "sessions" / str(session.session_id)
     assert (legacy_dir / "runs" / str(run.run_id) / "evidence").is_dir()
     await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_first_run_renames_legacy_upload_dir_and_updates_artifact_paths(
+    tmp_path: Path,
+):
+    service, paths, conn = await _build_run_service(tmp_path)
+    try:
+        session = await service._sessions.create(Session())
+        legacy_dir = paths.sessions_root / str(session.session_id)
+        legacy_dir.mkdir(parents=True)
+        original = legacy_dir / "uploads" / "artifact.bin"
+        normalized = legacy_dir / "normalized" / "artifact.txt"
+        original.parent.mkdir(parents=True)
+        normalized.parent.mkdir(parents=True)
+        original.write_bytes(b"upload")
+        normalized.write_text("normalized", encoding="utf-8")
+        artifact = await service._artifacts.create(
+            Artifact(
+                session_id=session.session_id,
+                kind=ArtifactKind.UPLOAD,
+                display_name="artifact.bin",
+                mime_type="application/octet-stream",
+                original_storage_path=str(original),
+                normalized_storage_path=str(normalized),
+            )
+        )
+
+        await service.create_run(session.session_id, await _create_question())
+
+        target_dir = paths.sessions_root / (
+            f"deepagents-边界分析与个人项目适用性-{session.session_id.hex[:8]}"
+        )
+        updated = await service._artifacts.get(artifact.artifact_id)
+        assert not legacy_dir.exists()
+        assert target_dir.is_dir()
+        assert (target_dir / "uploads" / "artifact.bin").read_bytes() == b"upload"
+        assert updated is not None
+        assert updated.original_storage_path == str(target_dir / "uploads" / "artifact.bin")
+        assert updated.normalized_storage_path == str(target_dir / "normalized" / "artifact.txt")
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_first_run_target_conflict_reuses_legacy_dir_without_merge(tmp_path: Path):
+    service, paths, conn = await _build_run_service(tmp_path)
+    try:
+        session = await service._sessions.create(Session())
+        legacy_dir = paths.sessions_root / str(session.session_id)
+        target_dir = paths.sessions_root / (
+            f"deepagents-边界分析与个人项目适用性-{session.session_id.hex[:8]}"
+        )
+        legacy_dir.mkdir(parents=True)
+        target_dir.mkdir(parents=True)
+        (legacy_dir / "legacy.txt").write_text("legacy", encoding="utf-8")
+        (target_dir / "target.txt").write_text("target", encoding="utf-8")
+
+        await service.create_run(session.session_id, await _create_question())
+
+        assert (legacy_dir / "legacy.txt").read_text(encoding="utf-8") == "legacy"
+        assert (target_dir / "target.txt").read_text(encoding="utf-8") == "target"
+        assert (legacy_dir / "runs").is_dir()
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_first_run_rename_race_with_target_creation_falls_back_to_legacy(
+    tmp_path: Path, monkeypatch
+):
+    service, paths, conn = await _build_run_service(tmp_path)
+    try:
+        session = await service._sessions.create(Session())
+        legacy_dir = paths.sessions_root / str(session.session_id)
+        target_dir = paths.sessions_root / (
+            f"deepagents-边界分析与个人项目适用性-{session.session_id.hex[:8]}"
+        )
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "legacy.txt").write_text("legacy", encoding="utf-8")
+        original_rename = type(legacy_dir).rename
+
+        def _race_rename(self, target):
+            if self == legacy_dir and target == target_dir:
+                target_dir.mkdir(parents=True)
+                (target_dir / "target.txt").write_text("target", encoding="utf-8")
+                raise FileExistsError(target_dir)
+            return original_rename(self, target)
+
+        monkeypatch.setattr(type(legacy_dir), "rename", _race_rename)
+
+        run = await service.create_run(session.session_id, await _create_question())
+
+        assert (legacy_dir / "legacy.txt").read_text(encoding="utf-8") == "legacy"
+        assert (legacy_dir / "runs" / str(run.run_id)).is_dir()
+        assert (target_dir / "target.txt").read_text(encoding="utf-8") == "target"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_artifact_path_update_failure_rolls_back_directory_rename(
+    tmp_path: Path, monkeypatch
+):
+    service, paths, conn = await _build_run_service(tmp_path)
+    try:
+        session = await service._sessions.create(Session())
+        legacy_dir = paths.sessions_root / str(session.session_id)
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "marker.txt").write_text("legacy", encoding="utf-8")
+
+        async def _fail(*args, **kwargs):
+            raise RuntimeError("path update failed")
+
+        monkeypatch.setattr(service._artifacts, "rewrite_storage_paths", _fail)
+
+        await service.create_run(session.session_id, await _create_question())
+
+        target_dir = paths.sessions_root / (
+            f"deepagents-边界分析与个人项目适用性-{session.session_id.hex[:8]}"
+        )
+        assert legacy_dir.is_dir()
+        assert not target_dir.exists()
+        assert (legacy_dir / "marker.txt").read_text(encoding="utf-8") == "legacy"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_rollback_failure_is_explicit_and_run_is_not_created(
+    tmp_path: Path, monkeypatch
+):
+    service, paths, conn = await _build_run_service(tmp_path)
+    try:
+        session = await service._sessions.create(Session())
+        legacy_dir = paths.sessions_root / str(session.session_id)
+        legacy_dir.mkdir(parents=True)
+
+        async def _fail(*args, **kwargs):
+            raise RuntimeError("path update failed")
+
+        monkeypatch.setattr(service._artifacts, "rewrite_storage_paths", _fail)
+
+        def _fail_rollback(*args, **kwargs):
+            raise RuntimeError("directory rollback failed")
+
+        monkeypatch.setattr(paths, "restore_legacy_session_dir", _fail_rollback)
+
+        with pytest.raises(RuntimeError, match="directory rollback failed"):
+            await service.create_run(session.session_id, await _create_question())
+
+        assert await service._runs.find_active_for_session(session.session_id) is None
+    finally:
+        await conn.close()

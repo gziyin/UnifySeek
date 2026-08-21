@@ -7,8 +7,13 @@ import time
 from dataclasses import dataclass
 from uuid import UUID
 
+from langgraph.errors import GraphRecursionError
+
 from ai_dev_researcher.agents.context import RunContext
-from ai_dev_researcher.agents.model import create_model_binding
+from ai_dev_researcher.agents.model import (
+    clone_for_structured_output,
+    create_model_binding,
+)
 from ai_dev_researcher.agents.orchestrator import create_research_agent
 from ai_dev_researcher.agents.stream_adapter import map_framework_event
 from ai_dev_researcher.core.config import Settings
@@ -17,6 +22,7 @@ from ai_dev_researcher.core.output_profiles import (
     get_output_profile,
     resolve_run_budget,
 )
+from ai_dev_researcher.domain.reports import ResearchReport
 from ai_dev_researcher.domain.runs import ALLOWED_TRANSITIONS, Run, RunStatus
 from ai_dev_researcher.repositories.artifacts import ArtifactRepository
 from ai_dev_researcher.repositories.evidence import EvidenceRepository
@@ -63,10 +69,14 @@ class _StreamAttemptResult:
     budget_reason: str | None = None
     degraded_reason: str | None = None
     last_message: str | None = None
+    recursion_error: str | None = None
+    finalization_due: bool = False
+    finalization_reason: str | None = None
 
 
 # 空闲超时哨兵：事件流内连续 idle_timeout 秒无事件时由 _iter_with_idle_timeout 产出。
 _IDLE_TIMEOUT_SENTINEL: dict = {"event": "__agent_idle_timeout__"}
+_GRAPH_RECURSION_SENTINEL = object()
 
 # record 类工具返回的短路 note：这些响应不产生真实证据，executor 不得发布
 # source.discovered / evidence.recorded 账本事件（引导文案随 tool.completed 输出）。
@@ -123,6 +133,15 @@ def _iter_with_idle_timeout(stream, timeout: float | None):
     return _gen()
 
 
+async def _iter_with_graph_recursion_classification(stream):
+    """Convert only LangGraph recursion failures into an attempt result marker."""
+    try:
+        async for raw in stream:
+            yield raw
+    except GraphRecursionError as exc:
+        yield (_GRAPH_RECURSION_SENTINEL, exc)
+
+
 class AgentResearchExecutor:
     """Run-level DeepAgents executor with event adaptation."""
 
@@ -152,6 +171,7 @@ class AgentResearchExecutor:
         if run is None:
             return
 
+        run_started = time.monotonic()
         budget = self._resolve_budget(run)
         context = RunContext(
             run_id=run.run_id,
@@ -232,34 +252,21 @@ class AgentResearchExecutor:
                     },
                     "config": {"configurable": {"thread_id": f"{run_id}:retry"}},
                 },
-                None,
             ]
 
             last_message: str | None = None
+            recursion_reasons: list[str] = []
+            finalization_reasons: list[str] = []
+            skip_remaining_attempts = False
+            finalization_reserve = self._finalization_reserve(context)
+            graph_deadline = (
+                run_started + context.max_elapsed_seconds - finalization_reserve
+                if context.max_elapsed_seconds > 0
+                else None
+            )
             for attempt_index, attempt in enumerate(attempts, start=1):
-                if attempt_index == 3:
-                    ledger_summary = await self._evidence_ledger_summary(store)
-                    attempt = {
-                        "input": {
-                            "messages": [
-                                {"role": "user", "content": run.request.question},
-                                {
-                                    "role": "user",
-                                    "content": (
-                                        "前两轮均已结束但未提交研究报告。下面是当前证据账本中"
-                                        "可直接引用的证据（只读摘要，最多 20 条）：\n"
-                                        f"{ledger_summary}\n\n"
-                                        "硬性要求：禁止再调用搜索/提取类工具；禁止输出纯文本报告；"
-                                        "必须立即调用 submit_research_report 提交报告；"
-                                        "每条 claim 只能引用上面列出的真实证据 ID；"
-                                        "若证据不足，请使用 medium/low 置信度并写入 unknowns，"
-                                        "但仍必须调用 submit_research_report。"
-                                    ),
-                                },
-                            ]
-                        },
-                        "config": {"configurable": {"thread_id": f"{run_id}:retry2"}},
-                    }
+                if skip_remaining_attempts:
+                    continue
                 attempt_result = await self._run_agent_attempt(
                     run=run,
                     context=context,
@@ -269,6 +276,8 @@ class AgentResearchExecutor:
                     config=attempt["config"],
                     attempt_index=attempt_index,
                     exploration_budget=self._exploration_budget(budget),
+                    run_started=run_started,
+                    graph_deadline=graph_deadline,
                 )
                 if attempt_result.last_message:
                     last_message = attempt_result.last_message
@@ -292,25 +301,77 @@ class AgentResearchExecutor:
                         reason=attempt_result.budget_reason,
                     )
                     raise _BudgetExceededError(attempt_result.budget_reason)
+                if attempt_result.recursion_error:
+                    recursion_reasons.append(attempt_result.recursion_error)
+                    skip_remaining_attempts = True
+                    continue
+                if attempt_result.finalization_due:
+                    if attempt_result.finalization_reason:
+                        finalization_reasons.append(attempt_result.finalization_reason)
+                    skip_remaining_attempts = True
+                    continue
             else:
-                reason = (
-                    "agent finished without submit_research_report after two controlled retries"
-                )
-                if last_message:
-                    reason += f"; last assistant message: {last_message[:500]}"
-                report_artifact_id = await self._write_degraded_report(
-                    context,
-                    store,
-                    reason,
-                    last_message=last_message,
-                )
-                await self._publish_report_ready(
-                    run,
-                    report_artifact_id,
-                    degraded=True,
-                    reason=reason,
-                )
-                raise RuntimeError(reason)
+                try:
+                    submitted = await self._finalize_report_structured(
+                        run=run,
+                        context=context,
+                        store=store,
+                        model_binding=model_binding,
+                        run_started=run_started,
+                    )
+                    report_artifact_id = str(submitted["artifact_id"])
+                    if submitted.get("degraded"):
+                        raise RuntimeError(
+                            submitted.get("reason") or "submit returned degraded report"
+                        )
+                    await self._publish_report_ready(
+                        run, report_artifact_id, degraded=False
+                    )
+                except _BudgetExceededError as exc:
+                    reason = str(exc)
+                    report_artifact_id = await self._write_degraded_report(
+                        context,
+                        store,
+                        reason,
+                        last_message=last_message,
+                    )
+                    await self._publish_report_ready(
+                        run,
+                        report_artifact_id,
+                        degraded=True,
+                        reason=reason,
+                    )
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    finalization_context = "; ".join(
+                        [*recursion_reasons, *finalization_reasons]
+                    )
+                    reason = (
+                        f"{finalization_context}; structured finalization failed: {exc}"
+                        if finalization_context
+                        else f"structured finalization failed: {exc}"
+                    )
+                    if report_artifact_id is None:
+                        report_artifact_id = await self._write_degraded_report(
+                            context,
+                            store,
+                            reason,
+                            last_message=last_message,
+                        )
+                        await self._publish_report_ready(
+                            run,
+                            report_artifact_id,
+                            degraded=True,
+                            reason=reason,
+                        )
+                    else:
+                        await self._publish_report_ready(
+                            run,
+                            report_artifact_id,
+                            degraded=True,
+                            reason=reason,
+                        )
+                    raise RuntimeError(reason) from exc
 
             await self._runs.update_status(
                 run_id,
@@ -435,13 +496,16 @@ class AgentResearchExecutor:
         config: dict,
         attempt_index: int = 1,
         exploration_budget: int | None = None,
+        run_started: float | None = None,
+        graph_deadline: float | None = None,
     ) -> _StreamAttemptResult:
         report_artifact_id: str | None = None
         last_message = ""
         # 维护 tool_call_id -> input_summary，用于在 tool.completed 上附带脱敏输入摘要。
         tool_inputs: dict[str, str] = {}
-        started = time.monotonic()
-        stage_started = started
+        attempt_started = time.monotonic()
+        budget_started = run_started if run_started is not None else attempt_started
+        stage_started = attempt_started
         stage = "plan"
         tool_call_count = 0
         # batch C：探索性工具调用计数，受 max_tool_calls - reserve 上限约束；
@@ -470,7 +534,10 @@ class AgentResearchExecutor:
             sb = _stage_budget()
             if sb and now - stage_started >= sb:
                 return f"budget_exceeded: stage_timeout:{stage}"
-            return self._budget_reason(tool_call_count, now - started, context)
+            return self._budget_reason(tool_call_count, now - budget_started, context)
+
+        def _finalization_due_at(now: float) -> bool:
+            return graph_deadline is not None and now >= graph_deadline
 
         def _advance_stage(event_type: str, payload: dict) -> None:
             nonlocal stage, stage_started
@@ -486,14 +553,50 @@ class AgentResearchExecutor:
             ):
                 stage = "report"
                 stage_started = time.monotonic()
+            elif (
+                stage == "research"
+                and event_type == "tool.completed"
+                and payload.get("tool_name") == "get_evidence_ledger"
+            ):
+                stage = "report"
+                stage_started = time.monotonic()
 
-        async for raw in _iter_with_idle_timeout(stream, idle_timeout):
+        classified_stream = _iter_with_graph_recursion_classification(
+            _iter_with_idle_timeout(stream, idle_timeout)
+        )
+        async for raw in classified_stream:
+            if (
+                isinstance(raw, tuple)
+                and len(raw) == 2
+                and raw[0] is _GRAPH_RECURSION_SENTINEL
+            ):
+                recursion_error = raw[1]
+                budget_reason = _budget_reason_at(time.monotonic())
+                if budget_reason:
+                    return _StreamAttemptResult(
+                        budget_reason=budget_reason,
+                        last_message=last_message or None,
+                    )
+                if _finalization_due_at(time.monotonic()):
+                    return _StreamAttemptResult(
+                        recursion_error=(
+                            f"{type(recursion_error).__name__}: {recursion_error}"
+                        ),
+                        finalization_due=True,
+                        last_message=last_message or None,
+                    )
+                return _StreamAttemptResult(
+                    recursion_error=(
+                        f"{type(recursion_error).__name__}: {recursion_error}"
+                    ),
+                    last_message=last_message or None,
+                )
             if raw is _IDLE_TIMEOUT_SENTINEL:
                 logger.warning(
                     "attempt %s idle timeout in stage=%s after %.1fs; treating as stuck",
                     attempt_index,
                     stage,
-                    time.monotonic() - started,
+                    time.monotonic() - attempt_started,
                 )
                 return _StreamAttemptResult(
                     report_artifact_id=report_artifact_id,
@@ -524,6 +627,13 @@ class AgentResearchExecutor:
                         exploration_budget is not None
                         and exploration_count >= exploration_budget
                     ):
+                        hard_budget_reason = _budget_reason_at(time.monotonic())
+                        if hard_budget_reason:
+                            return _StreamAttemptResult(
+                                report_artifact_id=report_artifact_id,
+                                budget_reason=hard_budget_reason,
+                                last_message=last_message or None,
+                            )
                         logger.warning(
                             "attempt %s exploration budget reached (count=%s>=%s); "
                             "blocking exploratory tool %s",
@@ -534,7 +644,8 @@ class AgentResearchExecutor:
                         )
                         return _StreamAttemptResult(
                             report_artifact_id=report_artifact_id,
-                            budget_reason="budget_exceeded: exploration_budget",
+                            finalization_due=True,
+                            finalization_reason="budget_exceeded: exploration_budget",
                             last_message=last_message or None,
                         )
                     exploration_count += 1
@@ -658,11 +769,25 @@ class AgentResearchExecutor:
                         degraded=degraded,
                         reason=payload.get("reason"),
                     )
+                    await self._publisher.publish(
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        event_type=event_type,
+                        actor=actor,
+                        payload={
+                            k: v
+                            for k, v in payload.items()
+                            if k not in {"discovered", "discovered_list", "recorded"}
+                        },
+                    )
                     if degraded:
                         return _StreamAttemptResult(
                             report_artifact_id=report_artifact_id,
                             degraded_reason=payload.get("reason"),
                         )
+                    return _StreamAttemptResult(
+                        report_artifact_id=report_artifact_id,
+                    )
 
             await self._publisher.publish(
                 session_id=run.session_id,
@@ -678,20 +803,128 @@ class AgentResearchExecutor:
                     report_artifact_id=report_artifact_id,
                     budget_reason=budget_reason,
                 )
+            if _finalization_due_at(time.monotonic()) and not report_artifact_id:
+                return _StreamAttemptResult(
+                    finalization_due=True,
+                    last_message=last_message or None,
+                )
 
+        budget_reason = _budget_reason_at(time.monotonic())
+        if budget_reason:
+            return _StreamAttemptResult(
+                report_artifact_id=report_artifact_id,
+                budget_reason=budget_reason,
+                last_message=last_message or None,
+            )
+        if _finalization_due_at(time.monotonic()) and not report_artifact_id:
+            return _StreamAttemptResult(
+                finalization_due=True,
+                last_message=last_message or None,
+            )
         if not report_artifact_id:
             logger.warning(
                 "attempt %s finished without submit_research_report: "
                 "tool_calls=%s elapsed=%.1fs last_message=%s",
                 attempt_index,
                 tool_call_count,
-                time.monotonic() - started,
+                time.monotonic() - attempt_started,
                 (last_message or "")[:1000],
             )
         return _StreamAttemptResult(
             report_artifact_id=report_artifact_id,
             last_message=last_message or None,
         )
+
+    async def _finalize_report_structured(
+        self,
+        *,
+        run: Run,
+        context: RunContext,
+        store: EvidenceStore,
+        model_binding,
+        run_started: float,
+    ) -> dict:
+        def _remaining_hard_budget() -> float | None:
+            if context.max_elapsed_seconds <= 0:
+                return None
+            return context.max_elapsed_seconds - (time.monotonic() - run_started)
+
+        remaining_total = _remaining_hard_budget()
+        if remaining_total is not None and remaining_total <= 0:
+            raise _BudgetExceededError("budget_exceeded: max_elapsed_seconds")
+        try:
+            ledger_summary = await asyncio.wait_for(
+                self._evidence_ledger_summary(store),
+                timeout=remaining_total,
+            )
+        except asyncio.TimeoutError as exc:
+            raise _BudgetExceededError("budget_exceeded: max_elapsed_seconds") from exc
+        structured_base_model = clone_for_structured_output(model_binding.instance)
+        structured_model = structured_base_model.with_structured_output(
+            ResearchReport,
+            method="function_calling",
+        )
+        report_timeout = context.settings.agent_report_timeout_seconds
+        remaining_total = _remaining_hard_budget()
+        if remaining_total is not None:
+            if remaining_total <= 0:
+                raise _BudgetExceededError("budget_exceeded: max_elapsed_seconds")
+        timeout_candidates = [
+            value for value in (report_timeout, remaining_total) if value and value > 0
+        ]
+        limited_by_total = remaining_total is not None and (
+            report_timeout <= 0 or remaining_total <= report_timeout
+        )
+        invoke = structured_model.ainvoke(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate a complete structured research report. "
+                        "Use only evidence IDs present in the ledger. "
+                        "Do not invent citations or evidence."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Research question:\n{run.request.question}\n\n"
+                        f"Evidence ledger:\n{ledger_summary}"
+                    ),
+                },
+            ]
+        )
+        try:
+            result = await asyncio.wait_for(
+                invoke,
+                timeout=min(timeout_candidates) if timeout_candidates else None,
+            )
+        except asyncio.TimeoutError as exc:
+            if limited_by_total:
+                raise _BudgetExceededError(
+                    "budget_exceeded: max_elapsed_seconds"
+                ) from exc
+            raise
+        remaining_after_invoke = _remaining_hard_budget()
+        if remaining_after_invoke is not None and remaining_after_invoke <= 0:
+            raise _BudgetExceededError("budget_exceeded: max_elapsed_seconds")
+        report = (
+            result
+            if isinstance(result, ResearchReport)
+            else ResearchReport.model_validate(result)
+        )
+        submitted = await submit_research_report_impl(
+            store=store,
+            artifacts=self._artifacts,
+            paths=self._paths,
+            session_id=context.session_id,
+            run_id=context.run_id,
+            report_data=report.model_dump(mode="json"),
+            system_generated=False,
+        )
+        if not submitted.get("artifact_id"):
+            raise RuntimeError("structured report submission returned no artifact")
+        return submitted
 
     async def _prefetch_knowledge(self, context: RunContext, store: EvidenceStore) -> None:
         """Deterministically inject KB context before model delegation (#13/#18).
@@ -845,6 +1078,16 @@ class AgentResearchExecutor:
         if budget.max_tool_calls <= 0:
             return None
         return max(0, budget.max_tool_calls - budget.reserve)
+
+    @staticmethod
+    def _finalization_reserve(context: RunContext) -> float:
+        """Reserve one third of the hard run budget for structured finalization."""
+        if context.max_elapsed_seconds <= 0:
+            return 0.0
+        report_timeout = context.settings.agent_report_timeout_seconds
+        if report_timeout > 0:
+            return min(context.max_elapsed_seconds / 3, report_timeout)
+        return context.max_elapsed_seconds / 3
 
     def _budget_reason(
         self,

@@ -85,13 +85,40 @@ class RunService:
                 if item.session_id != session_id or item.kind != ArtifactKind.UPLOAD:
                     raise SessionNotFoundError(f"artifact not authorized: {item.artifact_id}")
 
+        display_name = await self._resolve_display_name(session, request)
+        await self._migrate_session_storage(session_id, display_name)
         run = Run(session_id=session_id, request=request, status=RunStatus.PENDING)
         await self._runs.create(run)
-        display_name = await self._resolve_display_name(session, request)
         self._paths.ensure_run_layout(session_id, run.run_id, display_name=display_name)
         await self._sessions.touch(session_id)
         await self._task_manager.start_run(run.run_id, timeout=self._hard_run_timeout(run))
         return run
+
+    async def _migrate_session_storage(
+        self, session_id: UUID, display_name: str | None
+    ) -> None:
+        if display_name is None:
+            return
+        renamed = self._paths.migrate_legacy_session_dir(session_id, display_name)
+        if renamed is None:
+            return
+        legacy_dir, target_dir = renamed
+        try:
+            await self._artifacts.rewrite_storage_paths(
+                session_id, legacy_dir, target_dir
+            )
+        except Exception as error:  # noqa: BLE001 - naming must not block runs
+            try:
+                self._paths.restore_legacy_session_dir(legacy_dir, target_dir)
+            except Exception as rollback_error:  # noqa: BLE001
+                raise RuntimeError(
+                    "directory rollback failed after artifact path update failure"
+                ) from rollback_error
+            logger.exception(
+                "failed to migrate session storage for %s; using legacy directory",
+                session_id,
+                exc_info=error,
+            )
 
     def _hard_run_timeout(self, run: Run) -> float:
         """TaskManager 硬超时 = run 总预算（mode profile + settings 收紧 + constraints 覆盖）+ grace。
